@@ -506,11 +506,12 @@ struct RendererState {
   // Popup background blur (see kBlurShaderSource): two intermediates at the
   // game's fixed 1152x640 internal resolution + a view of the guest output
   // (re-created when the output texture changes). Steady state for
-  // blur_tex is RENDER_TARGET.
+  // blur_tex is RENDER_TARGET; blur_format is the format it was built with.
   static constexpr uint32_t kBlurWidth = 1152;
   static constexpr uint32_t kBlurHeight = 640;
   nrhi::Texture* blur_tex[2] = {nullptr, nullptr};
   nrhi::TextureView* blur_srv[2] = {nullptr, nullptr};
+  nrhi::Format blur_format = nrhi::Format::kUnknown;
   nrhi::TextureView* output_srv_slot = nullptr;
   bool output_srv_allocated = false;
   nrhi::Pipeline* pso_blur = nullptr;
@@ -521,12 +522,13 @@ struct RendererState {
   // of the compose so it frosts everything drawn (3D + HUD/2D + FMV).
   // Deliberately independent of the popup-blur port above (that chain
   // reproduces the console's 1152x640 lattice on purpose). Steady state
-  // RENDER_TARGET; recreated on output size change.
+  // RENDER_TARGET; recreated on output size or format change.
   nrhi::Pipeline* pso_menu_gauss = nullptr;
   nrhi::Texture* menu_blur_tex[2] = {nullptr, nullptr};
   nrhi::TextureView* menu_blur_srv[2] = {nullptr, nullptr};
   uint32_t menu_blur_w = 0;
   uint32_t menu_blur_h = 0;
+  nrhi::Format menu_blur_format = nrhi::Format::kUnknown;
   // Native photo grab (photo_grab_native): the blur downsample pass (whose
   // 1152x640 blur space happens to BE the game's screenshot-target raster)
   // renders the finished frame into blur_tex[0], which is then copied into

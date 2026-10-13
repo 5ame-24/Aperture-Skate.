@@ -3803,14 +3803,26 @@ bool EnsureShadowResources(const NativeGuestOutputRenderContext& context) {
 // only disable their feature, never abort the native path.
 bool EnsureBlurOutlineTargets(const NativeGuestOutputRenderContext& context) {
   nrhi::Device* device = context.device;
+  const nrhi::Format output_format = context.guest_output->format();
+  if (g_r.blur_tex[0] != nullptr && g_r.blur_format != output_format) {
+    // The blur PSOs follow the output format (rtv_format rebuild), so the
+    // intermediates they render into must too.
+    for (int t = 0; t < 2; ++t) {
+      if (g_r.blur_srv[t]) device->DestroyDeferred(g_r.blur_srv[t]);
+      g_r.blur_srv[t] = nullptr;
+      if (g_r.blur_tex[t]) device->DestroyDeferred(g_r.blur_tex[t]);
+      g_r.blur_tex[t] = nullptr;
+    }
+  }
   if (g_r.blur_tex[0] == nullptr && g_r.pso_blur != nullptr) {
     // Popup background blur intermediates at the game's fixed 1152x640
     // internal resolution (the bilinear stretch back to the output is what
-    // produces the authentic frosted-glass lattice).
+    // produces the authentic frosted-glass lattice). Recreated when the
+    // output format changes.
     nrhi::TextureDesc desc;
     desc.width = RendererState::kBlurWidth;
     desc.height = RendererState::kBlurHeight;
-    desc.format = context.guest_output->format();
+    desc.format = output_format;
     desc.initial_state = nrhi::ResourceState::kRenderTarget;
     bool ok = true;
     for (int t = 0; t < 2 && ok; ++t) {
@@ -3832,7 +3844,9 @@ bool EnsureBlurOutlineTargets(const NativeGuestOutputRenderContext& context) {
         break;
       }
     }
-    if (!ok) {
+    if (ok) {
+      g_r.blur_format = output_format;
+    } else {
       REXLOG_ERROR("native-scene: blur intermediate creation failed; blur disabled");
       for (int t = 0; t < 2; ++t) {
         if (g_r.blur_srv[t]) device->DestroyDeferred(g_r.blur_srv[t]);
@@ -3846,11 +3860,12 @@ bool EnsureBlurOutlineTargets(const NativeGuestOutputRenderContext& context) {
 
   // Settings-menu gaussian intermediates: half the output resolution
   // (sigma halves with it; the final bilinear stretch back is invisible
-  // under a real blur), recreated whenever the output size changes.
+  // under a real blur), recreated whenever the output size or format
+  // changes.
   const uint32_t menu_w = std::max(1u, context.guest_output_width / 2);
   const uint32_t menu_h = std::max(1u, context.guest_output_height / 2);
   if ((g_r.menu_blur_tex[0] == nullptr || g_r.menu_blur_w != menu_w ||
-       g_r.menu_blur_h != menu_h) &&
+       g_r.menu_blur_h != menu_h || g_r.menu_blur_format != output_format) &&
       g_r.pso_menu_gauss != nullptr) {
     for (int t = 0; t < 2; ++t) {
       if (g_r.menu_blur_srv[t]) device->DestroyDeferred(g_r.menu_blur_srv[t]);
@@ -3861,7 +3876,7 @@ bool EnsureBlurOutlineTargets(const NativeGuestOutputRenderContext& context) {
     nrhi::TextureDesc desc;
     desc.width = menu_w;
     desc.height = menu_h;
-    desc.format = context.guest_output->format();
+    desc.format = output_format;
     desc.initial_state = nrhi::ResourceState::kRenderTarget;
     desc.usage = nrhi::kTextureUsageRenderTarget;
     bool ok = true;
@@ -3882,6 +3897,7 @@ bool EnsureBlurOutlineTargets(const NativeGuestOutputRenderContext& context) {
     if (ok) {
       g_r.menu_blur_w = menu_w;
       g_r.menu_blur_h = menu_h;
+      g_r.menu_blur_format = output_format;
     } else {
       REXLOG_ERROR(
           "native-scene: menu blur intermediate creation failed; menu blur "
