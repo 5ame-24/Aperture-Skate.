@@ -63,7 +63,8 @@ bool PngEncoderClsid(CLSID* clsid) {
 
 // Last timestamp handed out, in ms since the epoch. Strictly increasing, so
 // two captures in the same millisecond (or after a clock step back) still
-// get distinct names, in capture order.
+// get distinct names, in capture order. After such a burst or step back the
+// stamp leads the clock until the clock catches up.
 std::atomic<int64_t> g_last_shot_ms{0};
 
 int64_t NextShotMs() {
