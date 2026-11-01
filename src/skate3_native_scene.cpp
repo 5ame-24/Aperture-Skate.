@@ -4,6 +4,7 @@
 // skate3_native_scene_gpu.cpp; state shared between the two is in
 // skate3_native_scene_state.h.
 
+#include "skate3_portal_camera.h"
 #include "skate3_portal_gate.h"
 #include "skate3_native_scene.h"
 
@@ -6316,6 +6317,7 @@ bool UpdateFreecam(FrameScene& scene, const float cam_view[16], double now) {
     skate3::portal_gate::FpvConsumeLook(&dyaw, &dpitch);
     fc.yaw += dyaw * fc.look_sign_x;
     fc.pitch = std::clamp(fc.pitch + dpitch * fc.look_sign_y, -kPitchMax, kPitchMax);
+    if (skate3::portal_camera::FpvTurn(&fc.yaw, &fc.pitch)) fc.pitch = std::clamp(fc.pitch, -kPitchMax, kPitchMax);
     double travel_yaw = 0.0;
     if (skate3::portal_gate::FpvAutoYaw(&travel_yaw)) {
       // ease the view toward where the skater is heading, and level it out
@@ -10076,8 +10078,16 @@ void BuildFrameScene(uint8_t* base, const SubmitRecord* records, size_t count) {
   // wins while engaged. No draw-item union here; the SetViewMatrix
   // override hands the flown pose to the game, whose own culling then
   // submits exactly what the drone sees (statics AND animated entities).
-  UpdateFreecam(scene, cam_view,
+  const bool freecam_owned = UpdateFreecam(scene, cam_view,
                 std::chrono::duration<double>(build_t0.time_since_epoch()).count());
+  // Portal camera carry (skate3_portal_camcarry): after a portal crossing the chase camera comes through the portal with the skater.
+  {
+    float carry_vp[16], carry_cam[3];
+    if (skate3::portal_camera::Apply(cam_view, scene.proj, freecam_owned, carry_vp, carry_cam)) {
+      std::memcpy(scene.view_proj, carry_vp, sizeof(carry_vp));
+      std::memcpy(scene.cam_pos, carry_cam, sizeof(carry_cam));
+    }
+  }
 
   // Hor+ ultrawide: widen the published camera to the wide output aspect.
   // Applied after every camera override (smoothing, synthetic pan, freecam)

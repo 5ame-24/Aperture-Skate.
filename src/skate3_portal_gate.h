@@ -18,6 +18,9 @@ bool PortalPairFrames(portal_math::Frame out[2]);
 // Another actor (an NPC skater) was teleported from `entry` to `exit`: its skeleton bodies get the same 4 s no-props zone the human's
 // crossing gets, so the prop code does not move them a second time.
 void NoteActorCrossing(const float entry[3], const float exit[3]);
+// The human's latest crossing (for the portal camera carry): a sequence number that changes with every crossing (0 = none yet), the
+// velocity rotation (row-major 3x3, out = R v), when (steady_clock ns), and the entry and exit points.
+unsigned LastCrossing(float R[9], long long* ns, float entry[3], float exit[3]);
 
 bool Enabled();
 

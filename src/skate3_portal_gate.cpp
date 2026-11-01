@@ -794,6 +794,8 @@ std::unordered_map<uint32_t, int64_t> g_skater_bodies;
 // that were never near the skater before, so they get a no-props zone for a few seconds.
 float g_zone[2][3] = {};
 int64_t g_zone_ns = 0;
+float g_cross_R[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};  // the latest human crossing's velocity rotation (camera carry)
+unsigned g_cross_seq = 0;
 // The same zone for NPC actor crossings (skate3_portal_npc), a few at once.
 struct ActorZone {
   float p[2][3] = {};
@@ -827,6 +829,15 @@ static bool SkaterBodyLocked(uint32_t id, const float p[3], int64_t now) {
   }
   (void)id;
   return false;
+}
+
+unsigned LastCrossing(float R[9], long long* ns, float entry[3], float exit[3]) {
+  std::lock_guard<std::mutex> lock(g_mutex);
+  std::copy(g_cross_R, g_cross_R + 9, R);
+  *ns = g_zone_ns;
+  std::copy(g_zone[0], g_zone[0] + 3, entry);
+  std::copy(g_zone[1], g_zone[1] + 3, exit);
+  return g_cross_seq;
 }
 
 void NoteActorCrossing(const float entry[3], const float exit[3]) {
@@ -1176,6 +1187,8 @@ bool Step(const float pos[3], bool allowed, unsigned flags, Cross* out) {
     std::copy(pos, pos + 3, g_zone[0]);
     std::copy(out->exit_pos, out->exit_pos + 3, g_zone[1]);
     g_zone_ns = now_ns();
+    std::copy(out->vel, out->vel + 9, g_cross_R);
+    ++g_cross_seq;
     g_have_prev = false;
     g_standing_block = 60;
     // A floor/ceiling pair is the endless fall: the way back into the portal is only ~2 m away, so a 0.75 s lockout

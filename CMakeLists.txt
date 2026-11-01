@@ -258,6 +258,7 @@ set(SKATE3_COMMON_SOURCES
     src/skate3_native_scene_post.cpp
     src/skate3_portal.cpp
     src/skate3_portal_math.cpp
+    src/skate3_portal_camera.cpp
     src/skate3_portal_probe.cpp
     src/skate3_portal_gate.cpp
     src/skate3_portal_cube.cpp
