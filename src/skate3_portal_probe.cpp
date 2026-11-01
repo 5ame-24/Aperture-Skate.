@@ -30,6 +30,7 @@
 #include "native/skate3_native_entity.h"
 #include "skate3_portal_cube.h"
 #include "skate3_portal_gate.h"
+#include "skate3_portal_math.h"
 #include "native/skate3_native_guest_read.h"
 
 REXCVAR_DEFINE_BOOL(skate3_portal_probe, true, "Skate 3",
@@ -54,6 +55,11 @@ REXCVAR_DEFINE_BOOL(skate3_portal_gate_cutout, false, "Skate 3",
                     "function 8276EE88) inside a portal opening are reported as misses, so the opening is not solid to "
                     "the queries that use rays (skeleton line tests and anything else). Experiment.")
     .debug_only()
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
+REXCVAR_DEFINE_BOOL(skate3_portal_npc, false, "Skate 3",
+                    "Experiment: other skaters (NPCs) that roll into a placed portal come out of the other one, through the same "
+                    "relocation the human uses (board moved with its rates kept and turned). Log prefix NPCX.")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
 REXCVAR_DEFINE_BOOL(skate3_portal_gate_turn, true, "Skate 3",
@@ -1061,6 +1067,137 @@ bool GateStep(PPCContext& ctx, uint8_t* base, uint32_t self) {
   return ok;
 }
 
+// ---- NPC skaters through portals (cvar skate3_portal_npc, log prefix NPCX) ----
+// Every skater actor runs sub_82DB88C8 (the game relocates the park skaters through the same path as the human), so an NPC can be
+// sent through a portal exactly like the human: a crossing test on its ground position, then ArmTeleport with a target matrix, and the
+// executor's board reset swapped for the rate-keeping SetTransform (profile B: 88% kept for the human, run 082). No skeleton restore
+// and no hole: the NPC's walls and floors stay solid, so the trigger planes sit in front of them (the human's non-hole rules).
+// shortcut: position = ground position (+1216) + 0.85 m, which is only current while riding; airborne NPCs cross when they land.
+thread_local uint32_t t_npc_actor = 0;  // inside an NPC's armed sub_82DB88C8: its board reset is replaced and turned
+thread_local float t_npc_m[9];
+
+struct NpcState {
+  float prev[3] = {};
+  bool have = false;
+  int cooldown = 0, standing_block = 0;
+  int follow = 0;  // frames of after-crossing logging left
+  float exit[3] = {}, speed_in = 0;
+  int64_t seen_ns = 0;
+};
+std::mutex g_npc_mutex;
+std::unordered_map<uint32_t, NpcState> g_npcs;
+std::atomic<int> g_npc_crossings{0};
+
+int64_t NpcNow() { return std::chrono::steady_clock::now().time_since_epoch().count(); }
+
+bool NpcStep(uint8_t* base, uint32_t sp, uint32_t self) {
+  uint32_t flags = 0, state = 0, w[3];
+  if (!ReadBe32(base, self + 1296, &flags) || !ReadBe32(base, self + 1336, &state) || !ReadBe32(base, self + 1216, &w[0]) ||
+      !ReadBe32(base, self + 1220, &w[1]) || !ReadBe32(base, self + 1224, &w[2])) {
+    return false;
+  }
+  const float p[3] = {std::bit_cast<float>(w[0]), std::bit_cast<float>(w[1]) + 0.85f, std::bit_cast<float>(w[2])};
+  if (!std::isfinite(p[0] + p[1] + p[2]) || InPit(p[0], p[2])) return false;
+  float v[3] = {0, 0, 0};
+  const bool have_v = ReadVec(base, self + 1248, v) && v[0] * v[0] + v[1] * v[1] + v[2] * v[2] < 80.0f * 80.0f;
+  const int64_t now = NpcNow();
+  skate3::portal_math::Frame g[2];
+  const bool pair = skate3::portal_gate::PortalPairFrames(g);
+  std::lock_guard lock(g_npc_mutex);
+  auto [it, fresh] = g_npcs.try_emplace(self);
+  NpcState& st = it->second;
+  if (fresh) {
+    if (g_npcs.size() <= 24) {
+      REXLOG_INFO("portal-probe: NPCX actor {:08X} seen: state {} flags {:08X} at ({:.2f}, {:.2f}, {:.2f}), {} actors so far", self,
+                  state, flags, p[0], p[1], p[2], g_npcs.size());
+    }
+    // forget actors not updated for 10 s (despawned park skaters)
+    for (auto i = g_npcs.begin(); i != g_npcs.end();) {
+      i = (i->first != self && now - i->second.seen_ns > 10'000'000'000ll) ? g_npcs.erase(i) : std::next(i);
+    }
+  }
+  st.seen_ns = now;
+  if (st.follow > 0 && (st.follow-- % 10) == 0) {
+    const float dx = p[0] - st.exit[0], dy = p[1] - st.exit[1], dz = p[2] - st.exit[2];
+    REXLOG_INFO("portal-probe: NPCX actor {:08X} after crossing t+{}: state {} flags {:08X} at ({:.2f}, {:.2f}, {:.2f}) {:.1f} m from the "
+                "exit, speed {:.1f} m/s (in {:.1f})",
+                self, 60 - st.follow, state, flags, p[0], p[1], p[2], std::sqrt(dx * dx + dy * dy + dz * dz),
+                std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]), st.speed_in);
+  }
+  if (st.cooldown > 0) --st.cooldown;
+  if (st.standing_block > 0) --st.standing_block;
+  // A jump of > 3 m in one update is a game relocation (or a landing after a stale airborne ground position): never a crossing.
+  const float step[3] = {p[0] - st.prev[0], p[1] - st.prev[1], p[2] - st.prev[2]};
+  const bool jumped = st.have && skate3::portal_math::Dot(step, step) > 9.0f;
+  // Not while teleporting, bailed (state 500: the board is detached and its rates explode when kept, run 122), spawning, recovering or
+  // already being relocated.
+  const bool can = pair && !jumped && state != 500 && state != 700 && state != 702 && !(flags & 0x40000000u) && !(flags & 0x00800000u) &&
+                   !(flags & kRelocateBit);
+  skate3::portal_math::Crossing c;
+  const skate3::portal_math::Rules rules;
+  const bool crossed = can && st.have && st.cooldown == 0 &&
+                       skate3::portal_math::TestCrossing(g, st.prev, p, st.standing_block == 0, rules, &c);
+  std::copy(p, p + 3, st.prev);
+  st.have = true;
+  if (!crossed) return false;
+  if (!have_v) {
+    v[0] = step[0] * 60.0f;  // shortcut: one update ~ 1/60 s
+    v[1] = step[1] * 60.0f;
+    v[2] = step[2] * 60.0f;
+  }
+  float vout[3];
+  skate3::portal_math::Apply(c.R, v, vout);
+  const float feet[3] = {c.exit_pos[0], c.exit_pos[1] - 0.85f + (c.ceiling_exit ? 0.0f : 1.0f), c.exit_pos[2]};
+  float target[16];
+  skate3::portal_math::ExitTarget(vout, c.exit_dir, feet, target);
+  const bool ok = ArmTeleport(base, sp, self, flags, target);
+  const int n = ++g_npc_crossings;
+  REXLOG_INFO("portal-probe: NPCX actor {:08X} crossed the {} portal (#{}) at ({:.2f}, {:.2f}, {:.2f}) state {} flags {:08X}: velocity ({:.1f}, "
+              "{:.1f}, {:.1f}) -> ({:.1f}, {:.1f}, {:.1f}), feet target ({:.2f}, {:.2f}, {:.2f}), teleport {}",
+              self, c.from ? "orange" : "blue", n, p[0], p[1], p[2], state, flags, v[0], v[1], v[2], vout[0], vout[1], vout[2], feet[0],
+              feet[1], feet[2], ok ? "armed" : "REFUSED");
+  if (!ok) return false;
+  st.cooldown = c.flat_pair ? 2 : 45;
+  st.standing_block = 60;
+  st.have = false;
+  st.follow = 60;
+  std::copy(feet, feet + 3, st.exit);
+  st.exit[1] += 0.85f;
+  st.speed_in = std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+  std::copy(c.R, c.R + 9, t_npc_m);
+  skate3::portal_gate::NoteActorCrossing(p, c.exit_pos);
+  return true;
+}
+
+// The NPC's board block after SetTransform: turn its 7 linear and 7 angular rates and its world velocity (+1248) by the pair's rotation,
+// fastest capped at kMaxExitSpeed (same as the human's TurnAndCapBlock, but with the NPC's own actor and matrix).
+void NpcTurnBlock(uint8_t* base, uint32_t block, uint32_t actor) {
+  float m[9];
+  std::copy(t_npc_m, t_npc_m + 9, m);
+  float fastest = 0.0f;
+  for (int i = 0; i < 7; ++i) {
+    float v[3];
+    if (ReadVec(base, block + kLinRates + 16 * i, v)) fastest = std::max(fastest, std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]));
+  }
+  const float k = fastest > kMaxExitSpeed ? kMaxExitSpeed / fastest : 1.0f;
+  for (float& x : m) x *= k;
+  int turned = 0;
+  auto one = [&](uint32_t addr) {
+    float v[3], o[3];
+    if (!ReadVec(base, addr, v)) return;
+    Turn(m, v, o);
+    for (int j = 0; j < 3; ++j) WriteBeFloat(base, addr + 4 * j, o[j]);
+    ++turned;
+  };
+  for (int i = 0; i < 7; ++i) {
+    one(block + kLinRates + 16 * i);
+    one(block + 0x1B0 + 16 * i);
+  }
+  one(actor + 1248);
+  REXLOG_INFO("portal-probe: NPCX actor {:08X} board reset replaced by SetTransform (block {:08X}), {} rate vectors turned, fastest {:.1f} m/s{}",
+              actor, block, turned, fastest, k < 1.0f ? " (capped)" : "");
+}
+
 // Move mode (cvar value 2): instead of the game's teleport (which resets every subsystem), call the board's
 // SetTransform 82C0B2C8, which "moves the whole board assembly while preserving rates, forces and contacts"
 // (Rust notes), and rewrite the actor's ground-position history so the jump is not read as a velocity.
@@ -1346,6 +1483,8 @@ extern "C" REX_FUNC(sub_82DB88C8) {
   const bool hop_armed = ArmRelocation(base, ctx.r1.u32, self);
   const bool gate_armed = !hop_armed && skate3::portal_gate::Enabled() && self == g_human &&
                           GateStep(ctx, base, self);
+  const bool npc_armed = !hop_armed && !gate_armed && g_human && self != g_human && REXCVAR_GET(skate3_portal_npc) &&
+                         skate3::portal_gate::Enabled() && NpcStep(base, ctx.r1.u32, self);
   // the speed-restore machinery runs for hop tests and for every gate crossing
   const bool armed = hop_armed || gate_armed;
   t_restore_rates = armed;
@@ -1358,6 +1497,10 @@ extern "C" REX_FUNC(sub_82DB88C8) {
     REXLOG_INFO("portal-probe: GATE crossing while off the board (state 500): plain board reset, rates not kept");
   }
   t_human_call = self == g_human;
+  if (npc_armed) {
+    t_surgery = true;  // NpcStep never arms in state 500
+    t_npc_actor = self;
+  }
   if (armed) {
     std::lock_guard lock(g_bundle_mutex);
     g_bundle.clear();
@@ -1368,6 +1511,10 @@ extern "C" REX_FUNC(sub_82DB88C8) {
   if (self == g_human && g_onboard_frames > 0) ForceOnBoard(base, self, "before the frame");
   __imp__sub_82DB88C8(ctx, base);
   t_surgery = false;
+  if (npc_armed && t_npc_actor) {
+    REXLOG_INFO("portal-probe: NPCX actor {:08X}: the teleport did not reset the board (no SetTransform swap happened)", self);
+  }
+  t_npc_actor = 0;
   if (self == g_human && gate_armed) {
     g_onboard_frames = 12;
     g_recover_window = 300;
@@ -1540,6 +1687,11 @@ extern "C" REX_FUNC(sub_82C05F50) {
     if (ReadBe32(base, board + 12, &block) && block >= 0x10000 && block < 0xC0000000 && !(block & 3)) {
       ctx.r3.u32 = block;
       sub_82C0B2C8(ctx, base);
+      if (t_npc_actor) {
+        NpcTurnBlock(base, block, t_npc_actor);
+        t_npc_actor = 0;
+        return;
+      }
       if (t_surgery) TurnAndCapBlock(base, block);
       REXLOG_INFO("portal-probe: GATE board reset replaced by SetTransform (block {:08X}, rates kept{})", block,
                   t_surgery ? "" : ", recovery warp");

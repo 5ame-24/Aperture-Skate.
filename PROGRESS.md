@@ -500,3 +500,30 @@ Actor offsets: +1200/+1216 ground pos, +1232 delta, +1248 velocity, +1296 flags,
     log as before: `GATE profile C ... (crossing #N)`, `GATE crossing with flags`, `GATE velocity in ... out`, `GATE teleport armed`,
     `GATE board reset replaced`, `GATE speed after crossing` with kept speed like runs 160+. No `GATE learn` / `GATE held` lines.
     If launch fails on an unknown flag, drop --skate3_portal_gate_ab/airmode/restore from the command line.
+52. LEAP: NPC skaters ride through portals (built, untested; cvar `skate3_portal_npc`, default OFF, hot reload). Log prefix `NPCX`.
+    - Design: every skater actor runs sub_82DB88C8 (IsPlayer's comment: the game relocates the park skaters through the same path), so a
+      non-human actor gets its own crossing state (`NpcStep`: previous position, cooldown 45 / 2 frames for flat pairs, 60-frame standing
+      block) and is sent with the human's relocation (`ArmTeleport`, thread-local target via the 82585CB0 hook). Its board reset is swapped
+      for SetTransform (`t_surgery` + `t_npc_actor`) and `NpcTurnBlock` turns its 7 lin + 7 ang board rates and actor +1248 by the pair
+      rotation (thread-local `t_npc_m`, speed cap 80). No skeleton restore and no hole for NPCs (profile B, 88% for the human).
+    - Crossing test: new pure module `src/skate3_portal_math.{h,cpp}` (frames, oval, pair rotation, stateless `TestCrossing`, `ExitTarget`),
+      unit-tested in `tests/skate3_portal_math_test.cpp` (passes). It reproduces the human's NON-hole rules (wall trigger 1.1 m, floor 2.2,
+      standing-in-a-floor-opening rule, exit = trigger + depth + clear 1.2 wall / 0.95 + 0.3 flat, wall exit >= centre - 1 m). The human's
+      `Step` is untouched. `portal_gate::PortalPairFrames` snapshots both portals for it.
+    - Position = ground +1216 + 0.85 m. Refused while state 500/700/702, flags 40000000 (recovery), 00800000 (spawn), relocate bit set, or
+      after a > 3 m jump in one update. Velocity = actor +1248 (else displacement x 60).
+    - Props: each NPC crossing adds a 4 s / 5 m no-props zone at its entry and exit (`NoteActorCrossing`, 8 slots), like the human's, so the
+      NPC's skeleton bodies are not moved again by the prop code.
+    Test (run with `--skate3_portal_npc=true` or toggle it in the cvar menu): place a wall portal on a wall the park skaters ride along,
+    or a floor portal on their path, and the other portal somewhere visible; wait near it.
+    - `NPCX actor X seen: state S flags F at (...)`: up to 24 lines at the start. If NONE appear, sub_82DB88C8 is human-only and the
+      design needs another hook (tell me).
+    - `NPCX actor X crossed the blue/orange portal (#N) ... teleport armed`, then `NPCX actor X board reset replaced by SetTransform ...
+      N rate vectors turned` (N should be 15), then `NPCX actor X after crossing t+K ... m from the exit, speed ...` every 10 frames.
+      Success = small distance from the exit (< 3 m at t+10) and speed near "in".
+    - Failure signs: `teleport REFUSED` (relocate bit already set: the game was moving it), `the teleport did not reset the board` (NPC
+      executor skips the board reset: rates not turned), the distance growing back to the entry (the AI drags the NPC back to its path),
+      `GATE exit speed capped` in a burst, or NPCs vanishing (the game respawns them). Screenshot plus clock if it looks wrong.
+    - Not done: airborne NPC crossings (ground position is stale in the air), hole for NPCs (they cannot enter a wall portal at the
+      plane, only at the trigger 1.1 m out), walkers (pedestrians are probably not skater actors), NPC AI path after the jump.
+
