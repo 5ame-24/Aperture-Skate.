@@ -526,4 +526,31 @@ Actor offsets: +1200/+1216 ground pos, +1232 delta, +1248 velocity, +1296 flags,
       `GATE exit speed capped` in a burst, or NPCs vanishing (the game respawns them). Screenshot plus clock if it looks wrong.
     - Not done: airborne NPC crossings (ground position is stale in the air), hole for NPCs (they cannot enter a wall portal at the
       plane, only at the trigger 1.1 m out), walkers (pedestrians are probably not skater actors), NPC AI path after the jump.
+53. LEAP: portal camera carry (built, untested; cvar `skate3_portal_camcarry`, default OFF, hot reload; `skate3_portal_camcarry_time`
+    0.6 s). Log prefix `PCAM`. Files: `src/skate3_portal_camera.{h,cpp}`, 10 lines in skate3_native_scene.cpp (after UpdateFreecam, and
+    the first-person look), pose maths in skate3_portal_math (tested).
+    - Every render frame the game camera's pose relative to the tracked skater goes into a 32-entry ring. On a human crossing
+      (`portal_gate::LastCrossing`: sequence, rotation, time, entry/exit points; set in `Step`) the pose recorded just before the
+      crossing is carried through the portal: position = skater + R x offset, axes = R x axes. That pose is shown and eased
+      (smoothstep, 0.6 s) into the game's own camera. While the tracked skater is still nearer the entry (render ran ahead of the game
+      thread) nothing is overridden. If the game camera is still far from the skater (> max(2.5 x, +4 m) of the carried distance) the
+      carried pose is held up to 2.5 s before the ease starts.
+    - First person: the look (yaw/pitch) is turned by R once per crossing (`FpvTurn`), so a same-wall pair does not leave you looking
+      back at the wall. Auto-centre then takes over as before.
+    - Only the rendered view changes: the game's camera and culling are untouched (no SetViewMatrix takeover), so for a few frames
+      things near the exit may be missing if the game camera is far away. Spec request R3 asks how to re-seat the game's camera instead.
+    Test (`--skate3_portal_camcarry=true`, third person): wall<->wall same-facing pair (the 180 deg case) and a floor->wall fling, a few
+    crossings each; then first person (Ctrl+4 / R3) through the same-wall pair.
+    - Expect per crossing: `PCAM carry started (crossing N): camera was (...) from the skater (D m, pose T ms before)`, then
+      `PCAM carry done ... largest frame-to-frame move: shown camera A m, game camera B m`. Good = A small (< ~1 m at 60 fps) while B is
+      large (the game's swing/cut). `python3 tools/re/leaplog.py` prints these.
+    - Watch for: a one-frame flash of the old place (render/game race: report the clock time), the horizon tilted after a floor exit and
+      slowly levelling (expected, as in Portal), `holding the carried pose` on every crossing (the game camera is slow to arrive: fine),
+      `no camera pose recorded` (ring timing problem), missing geometry near the exit for a few frames (culling, R3).
+    - First person: `PCAM first person turned through the portal (crossing N): yaw a -> b deg`.
+54. Cleanroom protocol adopted (user, 2026-11-02): implementation from specs only (docs/specs/, PROGRESS findings count as specs),
+    requests in docs/spec-requests.md (R1-R4 open), tools that read game files run on the user's machine (commit scripts, not output).
+    Checked CLAUDE.md/PROGRESS.md for pasted code: none; the closest is item 39 (wake steps), which is pseudocode-level prose.
+    New tool: `tools/re/leaplog.py [log]` summarises NPCX and PCAM lines. Note: crossings.py keys on `GATE crossing with flags`, not the
+    kept `GATE profile C` line, so that line can go (local task).
 

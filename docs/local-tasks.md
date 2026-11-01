@@ -3,8 +3,27 @@
 Each entry is a complete prompt. Paste one at a time. Shared rules for every task:
 - Repo: Skate 3 recomp x Portal mashup. Do not touch third_party/, generated/, out/, game/.
 - Keep behaviour identical unless the task says otherwise. No new features.
-- The full app cannot be built without the SDK and generated code; the checks below say what to run instead.
+- Build check when the task touches src/: `cmake --build out/build/macos-release --target skate3 -j 8` must succeed with no new
+  warnings in the files you touched. Unit tests: see T2 (`tests/run.sh` once it exists).
 - Commit with a one-line message naming the task number.
+
+## Which model, and how to run them
+Rule of thumb: **Haiku 5.5** when the prompt already contains every fact and the edit has a known shape (delete/rename/move/
+script from a recipe), **Sonnet 5.5** when it must read several files or keep behaviour identical through a non-trivial refactor,
+**leave to cloud** when it needs reverse engineering, new mechanics, or design choices.
+Batching: put Haiku tasks that touch different files into ONE session (they share nothing, the prompts are self-contained, and one
+session start costs less than several); run each Sonnet task in its OWN fresh session (it needs the context room for the files it
+reads). Commit after every task so a bad one can be reverted alone.
+
+| Task | Model | Why |
+|---|---|---|
+| T1 | Haiku | one-line deletion, location given |
+| T2 | Haiku | small shell script, exact commands given |
+| T3 | Haiku | comment rewrite, all facts in the prompt |
+| T4 | Haiku | move one block of text, no wording changes |
+| T5 | Haiku | delete one log line + its comment |
+| T6 | Sonnet | behaviour-identical refactor across two files, needs judgment and a build |
+Suggested runs: one Haiku session for T1-T5, then one Sonnet session for T6.
 
 ---
 
@@ -34,3 +53,23 @@ Files: `PROGRESS.md`.
 Goal: under "Untested in the latest build", item 5 ("Run 093 user report") sits after item 15. Move it between items 4 and 6 (the
 numbers already exist; there is no item 4 text, leave that). Do not change any wording. Do not touch sections 16 onwards.
 Check: `git diff --stat` shows only PROGRESS.md, same number of added and removed lines.
+
+## T5. Drop the legacy "GATE profile C" log line
+Files: `src/skate3_portal_probe.cpp` (in `GateStep`).
+Goal: delete the line `REXLOG_INFO("portal-probe: GATE profile C: board move + restored skeleton (crossing #{})", g_cross_count);`
+and the comment line above it ("Same text as when the A/B learner..."). Keep `++g_cross_count;`. If `g_cross_count` is then
+unused anywhere, delete its declaration too (and the 3-line comment above it, which describes the old learner's result; move that
+comment's content into nothing - it is already in PROGRESS.md section 51).
+Check: build passes; `grep -n "GATE profile" src tools -r` prints nothing; `python3 tools/re/crossings.py <an old log>` still works.
+
+## T6. Make gate.cpp's prop and cube crossings use skate3_portal_math
+Files: `src/skate3_portal_gate.cpp` (`BodyCross`, `CubeCross`, `PairMatrices`), `src/skate3_portal_math.{h,cpp}` (read; add nothing
+unless needed), `tests/skate3_portal_math_test.cpp`.
+Goal: those three functions each rebuild the portal rotation `R[k][j] = -x.r[k] e.r[j] + x.u[k] e.u[j] - x.n[k] e.n[j]` and the
+exit point `x.c - lat x.r + vert x.u + d x.n` by hand. Replace the hand-written loops with `portal_math::PairRotation`,
+`portal_math::Apply` and `portal_math::MapPoint` (build a `portal_math::Frame` from each `Gate` with `SetFrame`, or add a small local
+helper). Results must be bit-for-bit the same maths (same formulas, same order of operations is not required, same values within
+float rounding). Do NOT touch `Step` (the human's crossing) or `HoleSkips`.
+Check: build passes; the unit tests pass; `git diff` shows only those functions; a short in-game run with a prop dropped through a
+floor portal still logs `portal-props: body ... crossed` and the cube still logs `portal-cube: crossed`.
+
