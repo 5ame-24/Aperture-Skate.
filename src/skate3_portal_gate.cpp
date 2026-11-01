@@ -1,5 +1,6 @@
 #include "skate3_portal_cube.h"
 #include "skate3_portal_gate.h"
+#include "skate3_portal_math.h"
 
 #include <algorithm>
 #include <atomic>
@@ -793,6 +794,14 @@ std::unordered_map<uint32_t, int64_t> g_skater_bodies;
 // that were never near the skater before, so they get a no-props zone for a few seconds.
 float g_zone[2][3] = {};
 int64_t g_zone_ns = 0;
+// The same zone for NPC actor crossings (skate3_portal_npc), a few at once.
+struct ActorZone {
+  float p[2][3] = {};
+  int64_t ns = 0;
+};
+constexpr int kActorZones = 8;
+ActorZone g_actor_zones[kActorZones];
+int g_actor_zone_next = 0;
 
 // Called with g_mutex held. True for the skater's own bodies (close to the tracked position, inside the post-crossing zone, or
 // labelled so a moment ago); labels what it finds.
@@ -809,8 +818,31 @@ static bool SkaterBodyLocked(uint32_t id, const float p[3], int64_t now) {
       }
     }
   }
+  for (const ActorZone& z : g_actor_zones) {
+    if (z.ns == 0 || now - z.ns >= 4'000'000'000ll) continue;
+    for (const auto& q : z.p) {
+      const float s[3] = {p[0] - q[0], p[1] - q[1], p[2] - q[2]};
+      if (Dot3(s, s) < 5.0f * 5.0f) return true;
+    }
+  }
   (void)id;
   return false;
+}
+
+void NoteActorCrossing(const float entry[3], const float exit[3]) {
+  std::lock_guard<std::mutex> lock(g_mutex);
+  ActorZone& z = g_actor_zones[g_actor_zone_next++ % kActorZones];
+  std::copy(entry, entry + 3, z.p[0]);
+  std::copy(exit, exit + 3, z.p[1]);
+  z.ns = now_ns();
+}
+
+bool PortalPairFrames(portal_math::Frame out[2]) {
+  if (!g_both_placed.load(std::memory_order_relaxed)) return false;
+  std::lock_guard<std::mutex> lock(g_mutex);
+  if (!g_gates[0].active || !g_gates[1].active) return false;
+  for (int i = 0; i < 2; ++i) portal_math::SetFrame(out[i], g_gates[i].c, g_gates[i].n, g_gates[i].u, g_gates[i].trigger);
+  return true;
 }
 
 bool BodyIsSkaters(uint32_t id, const float p[3]) {

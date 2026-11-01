@@ -7,7 +7,17 @@
 
 #include <rex/ui/imgui_dialog.h>
 
+namespace skate3::portal_math {
+struct Frame;
+}
+
 namespace skate3::portal_gate {
+
+// Both portals as pure frames (skate3_portal_math), for crossings of actors other than the human. False unless both are placed.
+bool PortalPairFrames(portal_math::Frame out[2]);
+// Another actor (an NPC skater) was teleported from `entry` to `exit`: its skeleton bodies get the same 4 s no-props zone the human's
+// crossing gets, so the prop code does not move them a second time.
+void NoteActorCrossing(const float entry[3], const float exit[3]);
 
 bool Enabled();
 
