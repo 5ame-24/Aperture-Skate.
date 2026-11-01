@@ -159,6 +159,17 @@ bool SkaterWorldPos(uint8_t* base, float out[3]);
 // The skater-family entity closest to `hint` within max_dist (frame-to-frame tracking of the human).
 bool SkaterWorldPosNear(uint8_t* base, const float hint[3], float max_dist, float out[3]);
 
+// Every live character entity: skater family (skater, colorized, CAC, aux) and LivingWorld (people), each with its world translation
+// (entity+416 block). Unplaced (all-zero) entities are skipped. Any thread. Returns the count written (at most `max`).
+struct CharacterEntity {
+  uint32_t entity = 0;
+  bool skater = false;  // false = LivingWorld
+  float pos[3] = {};
+};
+int CharacterEntities(uint8_t* base, CharacterEntity* out, int max);
+// World translation of one entity (entity+416). False when it is no longer a live character entity or the read faults.
+bool CharacterWorldPos(uint8_t* base, uint32_t entity, float out[3]);
+
 // Rate-limited ident[] stats line; call once per built frame.
 void EmitStats();
 

@@ -62,6 +62,21 @@ REXCVAR_DEFINE_BOOL(skate3_portal_npc, false, "Skate 3",
                     "relocation the human uses (board moved with its rates kept and turned). Log prefix NPCX.")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
+REXCVAR_DEFINE_BOOL(skate3_portal_fling, false, "Skate 3",
+                    "Experiment: for a few frames after you go through a portal, keep your speed along the exit direction at what the portal "
+                    "says it should be (entry velocity turned by the portal, minus gravity), so a fall into a floor portal flings you out of a "
+                    "wall portal. Log prefix FLING.")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
+REXCVAR_DEFINE_INT32(skate3_portal_fling_frames, 10, "Skate 3",
+                     "How many frames after a crossing the FLING assist holds the exit speed.")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
+REXCVAR_DEFINE_BOOL(skate3_portal_props_characters, false, "Skate 3",
+                    "Old behaviour (runs before 182): physics bodies of NPC skaters and pedestrians count as props (they get the floor hole "
+                    "and cross as loose groups, torn away from their character). Off = characters keep solid portals and are left alone.")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
 REXCVAR_DEFINE_BOOL(skate3_portal_gate_turn, true, "Skate 3",
                     "Portal gate: turn the board's velocity from the entry portal's frame to the exit portal's, so "
                     "portals on different walls, floors and ceilings redirect your speed like Portal. Applies to the vectors the restore puts back.")
@@ -798,6 +813,114 @@ void LogActor(uint8_t* base, uint32_t self, const char* when) {
   }
 }
 
+// ---- FLING: hold the portal's exit velocity for a few frames (cvar skate3_portal_fling) ----
+// Portal's rule is v_out = R v_in (R = the pair rotation). The crossing already turns the board's rates once (TurnAndCapBlock), but the
+// FRAME logs (runs 120/121) showed the game replacing them within 1-2 frames, and a fall into a floor portal came out of the wall with
+// the fall speed gone (the player loops through the pair instead of being flung, run 181). For the next N frames the board's 7 linear
+// rates are checked against the ballistic expectation v_out + g t along the exit direction and topped up when below 90% of it.
+// shortcut: gravity 9.81 m/s^2 (the game's value is not specified); only the component along the exit direction is touched.
+struct Fling {
+  int left = 0, k = 0;
+  float vout[3] = {}, dir[3] = {}, speed = 0;
+  int64_t t0 = 0;
+  int topped = 0;
+};
+Fling g_fling;
+std::atomic<uint32_t> g_human_entity{0};  // the human's presentation entity (nearest skater entity to the tracked point)
+
+void FlingFrame(uint8_t* base, uint32_t self) {
+  Fling& f = g_fling;
+  if (f.left <= 0) return;
+  --f.left;
+  ++f.k;
+  uint32_t state = 0, board = 0, block = 0;
+  ReadBe32(base, self + 1336, &state);
+  const bool have_block = ReadBe32(base, self + 1880, &board) && ReadBe32(base, board + 12, &block) && block >= 0x10000 &&
+                          block < 0xC0000000 && !(block & 3);
+  bool insane = false;  // an exploded solver (the same 1.5 x cap RatesInsane uses)
+  for (int i = 0; i < 7 && have_block; ++i) {
+    float v[3];
+    if (ReadVec(base, block + kLinRates + 16 * i, v) && !(std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]) < 1.5f * kMaxExitSpeed)) insane = true;
+  }
+  if (state == 500 || !have_block || insane) {
+    REXLOG_INFO("portal-probe: FLING +{} stopped ({}), {} top-ups", f.k, state == 500 ? "bailed" : "board unreadable or rates insane", f.topped);
+    f.left = 0;
+    return;
+  }
+  const float t = float(std::chrono::steady_clock::now().time_since_epoch().count() - f.t0) * 1e-9f;
+  const float expect[3] = {f.vout[0], f.vout[1] - 9.81f * t, f.vout[2]};
+  const float e_along = expect[0] * f.dir[0] + expect[1] * f.dir[1] + expect[2] * f.dir[2];
+  float mean[3] = {0, 0, 0};
+  int n = 0;
+  for (int i = 0; i < 7; ++i) {
+    float v[3];
+    if (!ReadVec(base, block + kLinRates + 16 * i, v)) continue;
+    for (int c = 0; c < 3; ++c) mean[c] += v[c];
+    ++n;
+  }
+  if (n == 0) return;
+  for (float& c : mean) c /= float(n);
+  const float along = mean[0] * f.dir[0] + mean[1] * f.dir[1] + mean[2] * f.dir[2];
+  if (e_along < 1.0f) {
+    REXLOG_INFO("portal-probe: FLING +{} done: expected speed along the exit is down to {:.1f} m/s (gravity), {} top-ups", f.k, e_along, f.topped);
+    f.left = 0;
+    return;
+  }
+  if (along >= 0.9f * e_along) {
+    REXLOG_INFO("portal-probe: FLING +{} ok: {:.1f} m/s along the exit (expected {:.1f}), state {}", f.k, along, e_along, state);
+  } else {
+    const float add = e_along - along;
+    for (int i = 0; i < 7; ++i) {
+      float v[3];
+      const uint32_t a = block + kLinRates + 16 * i;
+      if (!ReadVec(base, a, v)) continue;
+      for (int c = 0; c < 3; ++c) WriteBeFloat(base, a + 4 * c, v[c] + add * f.dir[c]);
+    }
+    float av[3];
+    if (ReadVec(base, self + 1248, av)) {
+      for (int c = 0; c < 3; ++c) WriteBeFloat(base, self + 1248 + 4 * c, av[c] + add * f.dir[c]);
+    }
+    ++f.topped;
+    REXLOG_INFO("portal-probe: FLING +{} topped up: {:.1f} -> {:.1f} m/s along the exit ({:.2f}, {:.2f}, {:.2f}), state {}", f.k, along, e_along,
+                f.dir[0], f.dir[1], f.dir[2], state);
+  }
+  if (f.left == 0) REXLOG_INFO("portal-probe: FLING window over after {} frames, {} top-ups", f.k, f.topped);
+}
+
+// Publish the other characters (NPC skaters, pedestrians) for the hole and the prop code, and remember which entity is the human's.
+void PublishCharacters(uint8_t* base, const float human[3]) {
+  skate3::native_entity::CharacterEntity ents[48];
+  const int n = skate3::native_entity::CharacterEntities(base, ents, 48);
+  int human_i = -1;
+  float best = 1.5f;
+  for (int i = 0; i < n; ++i) {
+    if (!ents[i].skater) continue;
+    const float d = std::hypot(ents[i].pos[0] - human[0], std::hypot(ents[i].pos[1] - human[1], ents[i].pos[2] - human[2]));
+    if (d < best) {
+      best = d;
+      human_i = i;
+    }
+  }
+  if (human_i >= 0) g_human_entity = ents[human_i].entity;
+  float pos[48][3];
+  int m = 0;
+  for (int i = 0; i < n; ++i) {
+    if (i == human_i) continue;
+    std::copy(ents[i].pos, ents[i].pos + 3, pos[m++]);
+  }
+  // skate3_portal_props_characters = the old behaviour: publish nobody, so characters' bodies are treated as props again.
+  skate3::portal_gate::SetCharacterPositions(pos, REXCVAR_GET(skate3_portal_props_characters) ? 0 : m);
+  static int64_t last_log = 0;
+  const int64_t now = std::chrono::steady_clock::now().time_since_epoch().count();
+  if (now - last_log > 10'000'000'000ll) {
+    last_log = now;
+    int skaters = 0;
+    for (int i = 0; i < n; ++i) skaters += ents[i].skater;
+    REXLOG_INFO("portal-probe: CHARS {} character entities ({} skater-family incl. the human {:08X}, {} people)", n, skaters,
+                human_i >= 0 ? ents[human_i].entity : 0u, n - skaters);
+  }
+}
+
 bool GateStep(PPCContext& ctx, uint8_t* base, uint32_t self) {
   const uint32_t sp = ctx.r1.u32;
   static float tracked[3], last[3];
@@ -821,6 +944,7 @@ bool GateStep(PPCContext& ctx, uint8_t* base, uint32_t self) {
     if (have && skate3::native_entity::SkaterWorldPosNear(base, tracked, 4.0f, head)) skate3::portal_gate::SetHead(head);
   }
   GunStep(have ? tracked : place_pos);
+  PublishCharacters(base, have ? tracked : place_pos);
   float p[3];
   if (riding) {
     // The actor's ground position is current while riding. The entity helper latched onto other skaters after
@@ -833,6 +957,7 @@ bool GateStep(PPCContext& ctx, uint8_t* base, uint32_t self) {
   // Speed of the tracked position, logged for ~48 frames after a crossing.
   static std::chrono::steady_clock::time_point last_t{};
   static float pre_speed = 0, speed_now = 0;
+  static float vel3[3] = {0, 0, 0};  // 3D velocity of the tracked point (smoothed), the "v_in" of the FLING assist
   static int speed_log_left = 0;
   static int trace_left = 0;  // longer trace after a crossing: where do momentum and tricks die?
   {
@@ -840,6 +965,9 @@ bool GateStep(PPCContext& ctx, uint8_t* base, uint32_t self) {
     const float dt = std::chrono::duration<float>(t - last_t).count();
     if (have && dt > 0.001f && dt < 0.2f) {
       speed_now = std::hypot(p[0] - last[0], p[2] - last[2]) / dt;
+      for (int c = 0; c < 3; ++c) vel3[c] += ((p[c] - last[c]) / dt - vel3[c]) * 0.5f;
+    } else if (!have) {
+      vel3[0] = vel3[1] = vel3[2] = 0.0f;
     }
     last_t = t;
     if (speed_log_left > 0 && (speed_log_left-- % 4) == 0) {
@@ -1058,9 +1186,42 @@ bool GateStep(PPCContext& ctx, uint8_t* base, uint32_t self) {
   // speed dies; a target ~1 m above the ground starts it airborne (state 200), which keeps the velocity (7 of 9
   // logged crossings, all ~1 m up, kept 7-9 m/s; both ground-level ones lost it).
   constexpr float kExitLift = 1.0f;
-  const float target[16] = {hz, 0, -hx, 0, 0, 1, 0, 0, hx, 0, hz, 0,
-                            cross.exit_pos[0], cross.exit_pos[1] - up_offset + kExitLift * cross.lift, cross.exit_pos[2], 1};
+  float feet_y = cross.exit_pos[1] - up_offset + kExitLift * cross.lift;
+  // The exit point is the entity centre (~0.85 m above the feet). With the hole a floor exit comes out depth + 0.02 above the plane, so the
+  // feet started up to 0.83 m INSIDE the floor and the skater sank or fell through once off the opening (run 181). Feet go on the floor plane;
+  // for a ceiling exit the head stays under it.
+  if (std::abs(cross.exit_n[1]) > 0.7f) {
+    const float* c = cross.exit_c;
+    const float* n = cross.exit_n;
+    const float plane_y = c[1] - (n[0] * (cross.exit_pos[0] - c[0]) + n[2] * (cross.exit_pos[2] - c[2])) / n[1];
+    const float was = feet_y;
+    if (n[1] > 0.0f) feet_y = std::max(feet_y, plane_y + 0.05f);
+    else feet_y = std::min(feet_y, plane_y - up_offset - 1.0f);
+    if (feet_y != was) {
+      REXLOG_INFO("portal-probe: EXITFIX {} exit: feet {:.2f} -> {:.2f} (plane {:.2f})", n[1] > 0.0f ? "floor" : "ceiling", was, feet_y, plane_y);
+    }
+  }
+  const float target[16] = {hz, 0, -hx, 0, 0, 1, 0, 0, hx, 0, hz, 0, cross.exit_pos[0], feet_y, cross.exit_pos[2], 1};
   const bool ok = ArmTeleport(base, sp, self, flags, target);
+  if (ok && REXCVAR_GET(skate3_portal_fling)) {
+    float vo[3];
+    Turn(cross.vel, vel3, vo);
+    const float sp_out = std::sqrt(vo[0] * vo[0] + vo[1] * vo[1] + vo[2] * vo[2]);
+    if (sp_out > 1.0f) {
+      g_fling = Fling{};
+      g_fling.left = std::clamp(int(REXCVAR_GET(skate3_portal_fling_frames)), 0, 120);
+      g_fling.speed = std::min(sp_out, kMaxExitSpeed);
+      for (int c = 0; c < 3; ++c) {
+        g_fling.dir[c] = vo[c] / sp_out;
+        g_fling.vout[c] = g_fling.dir[c] * g_fling.speed;
+      }
+      g_fling.t0 = std::chrono::steady_clock::now().time_since_epoch().count();
+      REXLOG_INFO("portal-probe: FLING armed: v_in ({:.1f}, {:.1f}, {:.1f}) -> v_out ({:.1f}, {:.1f}, {:.1f}) {:.1f} m/s for {} frames", vel3[0],
+                  vel3[1], vel3[2], g_fling.vout[0], g_fling.vout[1], g_fling.vout[2], g_fling.speed, g_fling.left);
+    } else {
+      REXLOG_INFO("portal-probe: FLING not armed: exit speed {:.1f} m/s (too slow to hold)", sp_out);
+    }
+  }
   REXLOG_INFO("portal-probe: GATE teleport {}: feet target ({:.2f}, {:.2f}, {:.2f}) heading ({:.2f}, {:.2f})",
               ok ? "armed" : "REFUSED", target[12], target[13], target[14], hx, hz);
   have = false;  // after the jump the old position is meaningless; wait for a riding frame
@@ -1083,23 +1244,126 @@ struct NpcState {
   int follow = 0;  // frames of after-crossing logging left
   float exit[3] = {}, speed_in = 0;
   int64_t seen_ns = 0;
+  // Link to the actor's presentation entity: the actor's own ground position (+1216) is all zeros for NPCs (run 180: every NPC "seen"
+  // at (0.00, 0.85, 0.00)), so the live position comes from the entity (its world matrix at entity+416, like the human's tracking).
+  uint32_t entity = 0;
+  int scan_wait = 0, scans = 0;
+  uint32_t cand_entity = 0;  // position-scan candidate, linked when two scans in a row agree
+  float v[3] = {};
+  int64_t last_ns = 0;
 };
 std::mutex g_npc_mutex;
 std::unordered_map<uint32_t, NpcState> g_npcs;
+std::unordered_map<uint32_t, uint32_t> g_entity_owner;  // entity -> NPC actor linked to it
 std::atomic<int> g_npc_crossings{0};
+// A pointer link that worked once ("region", offset) is tried first on every other actor.
+int g_ptr_region = -1;
+uint32_t g_ptr_off = 0;
 
 int64_t NpcNow() { return std::chrono::steady_clock::now().time_since_epoch().count(); }
 
-bool NpcStep(uint8_t* base, uint32_t sp, uint32_t self) {
-  uint32_t flags = 0, state = 0, w[3];
-  if (!ReadBe32(base, self + 1296, &flags) || !ReadBe32(base, self + 1336, &state) || !ReadBe32(base, self + 1216, &w[0]) ||
-      !ReadBe32(base, self + 1220, &w[1]) || !ReadBe32(base, self + 1224, &w[2])) {
-    return false;
+// The regions scanned for a link: the actor, its board object and its skeleton (offsets from PROGRESS / CLAUDE.md).
+uint32_t NpcRegion(uint8_t* base, uint32_t self, int r, uint32_t* bytes) {
+  uint32_t a = 0;
+  switch (r) {
+    case 0:
+      *bytes = 0x2000;
+      return self;
+    case 1:
+      *bytes = 0x200;
+      return ReadBe32(base, self + 1880, &a) ? a : 0;
+    default:
+      *bytes = 0x4100;
+      return ReadBe32(base, self + 1884, &a) ? a : 0;
   }
-  const float p[3] = {std::bit_cast<float>(w[0]), std::bit_cast<float>(w[1]) + 0.85f, std::bit_cast<float>(w[2])};
-  if (!std::isfinite(p[0] + p[1] + p[2]) || InPit(p[0], p[2])) return false;
-  float v[3] = {0, 0, 0};
-  const bool have_v = ReadVec(base, self + 1248, v) && v[0] * v[0] + v[1] * v[1] + v[2] * v[2] < 80.0f * 80.0f;
+}
+const char* NpcRegionName(int r) { return r == 0 ? "actor" : r == 1 ? "board" : "skeleton"; }
+
+// One link attempt for an unlinked NPC actor. Caller holds g_npc_mutex.
+void NpcTryLink(uint8_t* base, uint32_t self, NpcState& st) {
+  skate3::native_entity::CharacterEntity ents[48];
+  const int n = skate3::native_entity::CharacterEntities(base, ents, 48);
+  const uint32_t human_ent = g_human_entity;
+  auto usable = [&](int i) { return ents[i].skater && ents[i].entity != human_ent && !g_entity_owner.count(ents[i].entity); };
+  auto link = [&](uint32_t ent, const char* how) {
+    st.entity = ent;
+    g_entity_owner[ent] = self;
+    REXLOG_INFO("portal-probe: NPCX actor {:08X} linked to skater entity {:08X} ({}), {} NPC actors linked", self, ent, how, g_entity_owner.size());
+  };
+  // 1. Pointer: a word in the actor / board / skeleton that equals a live skater entity's address. The known offset first.
+  for (int pass = 0; pass < 2; ++pass) {
+    for (int r = 0; r < 3; ++r) {
+      if (pass == 0 && r != g_ptr_region) continue;
+      uint32_t bytes = 0;
+      const uint32_t start = NpcRegion(base, self, r, &bytes);
+      if (start < 0x10000 || start >= 0xC0000000 || (start & 3)) continue;
+      const uint32_t from = pass == 0 ? g_ptr_off : 0, to = pass == 0 ? g_ptr_off + 4 : std::min<uint32_t>(bytes, 0x1000);
+      for (uint32_t off = from; off < to; off += 4) {
+        uint32_t w = 0;
+        if (!ReadBe32(base, start + off, &w)) continue;
+        for (int i = 0; i < n; ++i) {
+          if (w != ents[i].entity || !usable(i)) continue;
+          char how[96];
+          std::snprintf(how, sizeof(how), "pointer at %s+0x%X", NpcRegionName(r), off);
+          if (g_ptr_region < 0) {
+            g_ptr_region = r;
+            g_ptr_off = off;
+            REXLOG_INFO("portal-probe: NPCX pointer link learned: {}+0x{:X} holds the presentation entity", NpcRegionName(r), off);
+          }
+          link(w, how);
+          return;
+        }
+      }
+    }
+  }
+  // 2. Position: a float triple in those regions within 0.25 m of a skater entity's position. Linked when the same entity wins two scans
+  // in a row (the NPC moves between scans, so a coincidence does not repeat).
+  int votes[48] = {};
+  char first_hit[96] = "";
+  for (int r = 0; r < 3; ++r) {
+    uint32_t bytes = 0;
+    const uint32_t start = NpcRegion(base, self, r, &bytes);
+    if (start < 0x10000 || start >= 0xC0000000 || (start & 3)) continue;
+    std::vector<uint32_t> raw(bytes / 4);
+    if (!skate3::native_scene::GuestTryCopy(raw.data(), base + start, bytes)) continue;
+    for (size_t k = 0; k + 2 < raw.size(); ++k) {
+      const float f[3] = {BeFloat(raw[k]), BeFloat(raw[k + 1]), BeFloat(raw[k + 2])};
+      if (!std::isfinite(f[0] + f[1] + f[2]) || std::abs(f[0]) + std::abs(f[2]) < 1.0f) continue;
+      for (int i = 0; i < n; ++i) {
+        if (!usable(i)) continue;
+        const float d = std::hypot(f[0] - ents[i].pos[0], std::hypot(f[1] - ents[i].pos[1], f[2] - ents[i].pos[2]));
+        if (d < 0.25f) {
+          if (!votes[i]++ && !first_hit[0]) std::snprintf(first_hit, sizeof(first_hit), "%s+0x%X", NpcRegionName(r), unsigned(k * 4));
+        }
+      }
+    }
+  }
+  int best = -1, total = 0;
+  for (int i = 0; i < n; ++i) {
+    total += votes[i];
+    if (votes[i] && (best < 0 || votes[i] > votes[best])) best = i;
+  }
+  ++st.scans;
+  if (best < 0) {
+    if (st.scans == 3) {
+      REXLOG_INFO("portal-probe: NPCX actor {:08X}: no pointer to and no copy of any of {} live character positions in actor/board/skeleton "
+                  "after 3 scans (keeps trying every 30 updates)", self, n);
+    }
+    st.cand_entity = 0;
+    return;
+  }
+  if (st.cand_entity == ents[best].entity) {
+    char how[128];
+    std::snprintf(how, sizeof(how), "position copy, first at %s, %d of %d hits", first_hit, votes[best], total);
+    link(ents[best].entity, how);
+  } else {
+    st.cand_entity = ents[best].entity;
+  }
+}
+
+bool NpcStep(uint8_t* base, uint32_t sp, uint32_t self) {
+  uint32_t flags = 0, state = 0;
+  if (!ReadBe32(base, self + 1296, &flags) || !ReadBe32(base, self + 1336, &state)) return false;
   const int64_t now = NpcNow();
   skate3::portal_math::Frame g[2];
   const bool pair = skate3::portal_gate::PortalPairFrames(g);
@@ -1107,26 +1371,53 @@ bool NpcStep(uint8_t* base, uint32_t sp, uint32_t self) {
   auto [it, fresh] = g_npcs.try_emplace(self);
   NpcState& st = it->second;
   if (fresh) {
-    if (g_npcs.size() <= 24) {
-      REXLOG_INFO("portal-probe: NPCX actor {:08X} seen: state {} flags {:08X} at ({:.2f}, {:.2f}, {:.2f}), {} actors so far", self,
-                  state, flags, p[0], p[1], p[2], g_npcs.size());
-    }
+    REXLOG_INFO("portal-probe: NPCX actor {:08X} seen: state {} flags {:08X}, tracking {} actors", self, state, flags, g_npcs.size());
     // forget actors not updated for 10 s (despawned park skaters)
     for (auto i = g_npcs.begin(); i != g_npcs.end();) {
-      i = (i->first != self && now - i->second.seen_ns > 10'000'000'000ll) ? g_npcs.erase(i) : std::next(i);
+      if (i->first != self && now - i->second.seen_ns > 10'000'000'000ll) {
+        REXLOG_INFO("portal-probe: NPCX actor {:08X} dropped (no update for 10 s)", i->first);
+        if (i->second.entity) g_entity_owner.erase(i->second.entity);
+        i = g_npcs.erase(i);
+      } else {
+        ++i;
+      }
     }
   }
   st.seen_ns = now;
+  if (!st.entity) {
+    if (st.scan_wait-- <= 0) {
+      st.scan_wait = 30;
+      NpcTryLink(base, self, st);
+    }
+    if (!st.entity) return false;
+  }
+  float p[3];
+  if (!skate3::native_entity::CharacterWorldPos(base, st.entity, p)) {
+    REXLOG_INFO("portal-probe: NPCX actor {:08X}: entity {:08X} is gone, unlinked", self, st.entity);
+    g_entity_owner.erase(st.entity);
+    st.entity = 0;
+    st.have = false;
+    return false;
+  }
+  if (InPit(p[0], p[2])) return false;
+  // Velocity from the entity's own motion (the actor's +1248 belongs with the zero ground position).
+  if (st.have && st.last_ns) {
+    const float dt = float(now - st.last_ns) * 1e-9f;
+    if (dt > 0.004f && dt < 0.2f) {
+      for (int c = 0; c < 3; ++c) st.v[c] += ((p[c] - st.prev[c]) / dt - st.v[c]) * 0.5f;
+    }
+  }
+  st.last_ns = now;
+  const float* v = st.v;
+  const float speed = std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
   if (st.follow > 0 && (st.follow-- % 10) == 0) {
     const float dx = p[0] - st.exit[0], dy = p[1] - st.exit[1], dz = p[2] - st.exit[2];
     REXLOG_INFO("portal-probe: NPCX actor {:08X} after crossing t+{}: state {} flags {:08X} at ({:.2f}, {:.2f}, {:.2f}) {:.1f} m from the "
                 "exit, speed {:.1f} m/s (in {:.1f})",
-                self, 60 - st.follow, state, flags, p[0], p[1], p[2], std::sqrt(dx * dx + dy * dy + dz * dz),
-                std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]), st.speed_in);
+                self, 60 - st.follow, state, flags, p[0], p[1], p[2], std::sqrt(dx * dx + dy * dy + dz * dz), speed, st.speed_in);
   }
   if (st.cooldown > 0) --st.cooldown;
   if (st.standing_block > 0) --st.standing_block;
-  // A jump of > 3 m in one update is a game relocation (or a landing after a stale airborne ground position): never a crossing.
   const float step[3] = {p[0] - st.prev[0], p[1] - st.prev[1], p[2] - st.prev[2]};
   const bool jumped = st.have && skate3::portal_math::Dot(step, step) > 9.0f;
   // Not while teleporting, bailed (state 500: the board is detached and its rates explode when kept, run 122), spawning, recovering or
@@ -1137,14 +1428,19 @@ bool NpcStep(uint8_t* base, uint32_t sp, uint32_t self) {
   const skate3::portal_math::Rules rules;
   const bool crossed = can && st.have && st.cooldown == 0 &&
                        skate3::portal_math::TestCrossing(g, st.prev, p, st.standing_block == 0, rules, &c);
+  if (pair && st.have && !crossed && !can && st.cooldown == 0) {
+    // Would it have crossed? Then say why it did not (once per actor per 2 s).
+    skate3::portal_math::Crossing dummy;
+    static std::unordered_map<uint32_t, int64_t> told;
+    if (skate3::portal_math::TestCrossing(g, st.prev, p, st.standing_block == 0, rules, &dummy) && now - told[self] > 2'000'000'000ll) {
+      told[self] = now;
+      REXLOG_INFO("portal-probe: NPCX actor {:08X} reached a portal but was not sent: state {} flags {:08X}{}", self, state, flags,
+                  jumped ? " (jumped > 3 m this update)" : "");
+    }
+  }
   std::copy(p, p + 3, st.prev);
   st.have = true;
   if (!crossed) return false;
-  if (!have_v) {
-    v[0] = step[0] * 60.0f;  // shortcut: one update ~ 1/60 s
-    v[1] = step[1] * 60.0f;
-    v[2] = step[2] * 60.0f;
-  }
   float vout[3];
   skate3::portal_math::Apply(c.R, v, vout);
   const float feet[3] = {c.exit_pos[0], c.exit_pos[1] - 0.85f + (c.ceiling_exit ? 0.0f : 1.0f), c.exit_pos[2]};
@@ -1161,9 +1457,8 @@ bool NpcStep(uint8_t* base, uint32_t sp, uint32_t self) {
   st.standing_block = 60;
   st.have = false;
   st.follow = 60;
-  std::copy(feet, feet + 3, st.exit);
-  st.exit[1] += 0.85f;
-  st.speed_in = std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+  std::copy(c.exit_pos, c.exit_pos + 3, st.exit);
+  st.speed_in = speed;
   std::copy(c.R, c.R + 9, t_npc_m);
   skate3::portal_gate::NoteActorCrossing(p, c.exit_pos);
   return true;
@@ -1520,6 +1815,7 @@ extern "C" REX_FUNC(sub_82DB88C8) {
     g_recover_window = 300;
     LogActor(base, self, "after the teleport");
   }
+  if (self == g_human && !gate_armed) FlingFrame(base, self);
   if (self == g_human && g_onboard_frames > 0) {
     ForceOnBoard(base, self, "after the frame");
     --g_onboard_frames;
@@ -2024,6 +2320,19 @@ void CrossGroup(uint8_t* base, uint32_t body, int64_t now) {
   float np[3], nv[3], R[9], plane[4];
   if (!skate3::portal_gate::BodyCross(body, p, v, np, nv, R, plane)) return;
   const std::vector<uint32_t> cluster = BodyCluster(body, now);
+  // A character's bodies (NPC skater, pedestrian): moving them tore them away from their character, which then vanished and fell (runs
+  // 180/181). Characters cross through their actor (skate3_portal_npc), not as props.
+  for (const uint32_t m : cluster) {
+    const auto it = g_bodies_seen.find(m);
+    if (skate3::portal_gate::NearCharacter(it != g_bodies_seen.end() ? it->second.p : p, 1.3f)) {
+      static int logged_c = 0;
+      if (logged_c++ < 10) {
+        REXLOG_INFO("portal-props: CHAR body {:08X} reached a portal but its cluster of {} belongs to a character (NPC or pedestrian), left alone",
+                    body, cluster.size());
+      }
+      return;
+    }
+  }
   for (const uint32_t m : cluster) {
     const auto it = g_bodies_seen.find(m);
     if (g_own_ids.count(m) || (it != g_bodies_seen.end() && it->second.near_frames >= kOwnFrames) || skate3::portal_gate::BodyIsSkaters(m, it != g_bodies_seen.end() ? it->second.p : p)) {
@@ -2453,7 +2762,7 @@ void BodiesFrame(uint8_t* base, const float skater[3], const float skater_v[2], 
     int n = 0;
     for (const auto& [id, s] : g_bodies_seen) {
       if (n < 24 && now - s.ns < 200'000'000ll && s.near_frames < kOwnFrames && !g_own_ids.count(id) &&
-          skate3::portal_gate::NearPortal(s.p, 12.0f)) {  // run 153: props 40 m from the skater got no hole when it was "within 30 m of the skater"
+          skate3::portal_gate::NearPortal(s.p, 12.0f) && !skate3::portal_gate::NearCharacter(s.p, 1.3f)) {  // run 153: props 40 m from the skater got no hole when it was "within 30 m of the skater"
         std::copy(s.p, s.p + 3, props[n]);
         std::copy(s.v, s.v + 3, props[n] + 3);
         ++n;
@@ -2469,7 +2778,8 @@ void BodiesFrame(uint8_t* base, const float skater[3], const float skater_v[2], 
       float to[3];
       // never the skater's own bodies (run 145: 820 "rescues" of the skeleton while standing 3 m under a wall portal)
       if (now - s.ns < 200'000'000ll && s.near_frames < kOwnFrames && !g_own_ids.count(id) && g_body_cooldown.count(id) &&
-          skate3::portal_gate::PropRescue(s.p, to) && !skate3::portal_gate::BodyIsSkaters(id, s.p)) {
+          skate3::portal_gate::PropRescue(s.p, to) && !skate3::portal_gate::BodyIsSkaters(id, s.p) &&
+          !skate3::portal_gate::NearCharacter(s.p, 1.3f)) {
         lost.push_back(id);
       }
     }

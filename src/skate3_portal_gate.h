@@ -64,6 +64,8 @@ struct Cross {
   float exit_dir[2];  // horizontal part of the other portal's front normal, the facing if there is no velocity
   float vel[9];       // row-major 3x3: world velocity entering -> world velocity leaving
   float lift;         // metres to raise the feet above the exit point (0 for a ceiling exit)
+  float exit_c[3];    // the exit portal's centre and front normal (keeps the feet out of a floor and the head out of a ceiling)
+  float exit_n[3];
 };
 // Game thread, once per frame for the human skater. `pos` is the skater's position. Returns true when `pos`
 // crossed a portal while `allowed` (else the crossing is logged and ignored; `flags` is only for that log).
@@ -72,6 +74,11 @@ bool Step(const float pos[3], bool allowed, unsigned flags, Cross* out);
 // True when both portals are placed and `p` lies in the opening of either (within `slack` metres of its plane and
 // inside its rectangle): the world's ray answers there are reported as misses so the wall/floor is not solid.
 bool InsideOpening(const float p[3], float slack);
+
+// Characters other than the human (NPC skaters and LivingWorld people), positions from their presentation entities, published by the probe
+// every frame. Their physics bodies are not props: no hole under them and no prop crossing (they vanished and fell, runs 180/181).
+void SetCharacterPositions(const float (*p)[3], int n);
+bool NearCharacter(const float p[3], float radius);
 
 // Body-collision hole. True when a world-triangle contact (triangle through `tri_point` with normal `tri_normal`) for a
 // moving shape centred at `mover` should be dropped: the triangle lies in a placed portal's plane and the shape is over

@@ -531,6 +531,47 @@ bool SkaterWorldPos(uint8_t* base, float out[3]) {
   return false;
 }
 
+namespace {
+bool EntityTranslation(uint8_t* base, uint32_t entity, float p[3]) {
+  float rows[12];
+  if (!LoadF32Block(base, entity + kEntL2WTrans, rows, 12)) return false;
+  p[0] = rows[3];
+  p[1] = rows[7];
+  p[2] = rows[11];
+  return std::isfinite(p[0]) && std::isfinite(p[1]) && std::isfinite(p[2]) &&
+         std::abs(p[0]) + std::abs(p[1]) + std::abs(p[2]) > 0.01f;
+}
+}  // namespace
+
+int CharacterEntities(uint8_t* base, CharacterEntity* out, int max) {
+  std::vector<std::pair<uint32_t, EntClass>> live;
+  {
+    std::lock_guard<std::mutex> lock(g_mu);
+    for (const auto& [ent, rec] : g_entities) {
+      if (rec.view_refs > 0 && rec.cls != EntClass::kUnknown) live.emplace_back(ent, rec.cls);
+    }
+  }
+  int n = 0;
+  for (const auto& [entity, cls] : live) {
+    if (n >= max) break;
+    CharacterEntity& c = out[n];
+    if (!EntityTranslation(base, entity, c.pos)) continue;
+    c.entity = entity;
+    c.skater = cls != EntClass::kLivingWorld;
+    ++n;
+  }
+  return n;
+}
+
+bool CharacterWorldPos(uint8_t* base, uint32_t entity, float out[3]) {
+  {
+    std::lock_guard<std::mutex> lock(g_mu);
+    const auto it = g_entities.find(entity);
+    if (it == g_entities.end() || it->second.view_refs <= 0 || it->second.cls == EntClass::kUnknown) return false;
+  }
+  return EntityTranslation(base, entity, out);
+}
+
 bool SkaterWorldPosNear(uint8_t* base, const float hint[3], float max_dist, float out[3]) {
   float best = max_dist;
   bool found = false;

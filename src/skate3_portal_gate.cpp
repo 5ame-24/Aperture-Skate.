@@ -334,6 +334,27 @@ bool NearPortal(const float p[3], float radius) {
 
 static float g_props[24][6];
 static int g_prop_n = 0;
+static float g_chars[48][3];
+static int g_char_n = 0;
+
+void SetCharacterPositions(const float (*p)[3], int n) {
+  std::lock_guard<std::mutex> lock(g_mutex);
+  g_char_n = std::min(n, 48);
+  for (int i = 0; i < g_char_n; ++i) std::copy(p[i], p[i] + 3, g_chars[i]);
+}
+
+static bool NearCharacterLocked(const float p[3], float radius) {
+  for (int i = 0; i < g_char_n; ++i) {
+    const float d[3] = {p[0] - g_chars[i][0], p[1] - g_chars[i][1], p[2] - g_chars[i][2]};
+    if (Dot3(d, d) < radius * radius) return true;
+  }
+  return false;
+}
+
+bool NearCharacter(const float p[3], float radius) {
+  std::lock_guard<std::mutex> lock(g_mutex);
+  return NearCharacterLocked(p, radius);
+}
 
 void SetPropPositions(const float (*pv)[6], int n) {
   std::lock_guard<std::mutex> lock(g_mutex);
@@ -635,6 +656,15 @@ bool HoleSkips(const float mover[3], const float tri_normal[3], const float tri_
   const float* prop = nullptr;
   const float to_skater[3] = {mover[0] - g_tracked[0], mover[1] - g_tracked[1], mover[2] - g_tracked[2]};
   const bool at_skater = g_tracked_valid && Dot3(to_skater, to_skater) < 0.8f * 0.8f;  // the board and feet: the skater's own hole rules
+  // Another character's body (an NPC skater standing or riding over the opening, a pedestrian): solid floor. Runs 180/181: NPCs dropped
+  // into the hole and were then moved as props. The 1.3 m reaches from the entity's origin to its feet and board.
+  if (!at_skater && NearCharacterLocked(mover, 1.3f)) {
+    static std::atomic<int> logged{0};
+    if (logged.fetch_add(1) < 10) {
+      REXLOG_INFO("portal-gate: HOLE kept solid under another character at ({:.2f}, {:.2f}, {:.2f})", mover[0], mover[1], mover[2]);
+    }
+    return false;
+  }
   for (int i = 0; i < g_prop_n && !prop && !at_skater; ++i) {
     const float d[3] = {mover[0] - g_props[i][0], mover[1] - g_props[i][1], mover[2] - g_props[i][2]};
     if (Dot3(d, d) < 0.7f * 0.7f) prop = g_props[i];
@@ -1145,6 +1175,14 @@ bool Step(const float pos[3], bool allowed, unsigned flags, Cross* out) {
         const float away[3] = {pos[0] - g_prev[0], pos[1] - g_prev[1], pos[2] - g_prev[2]};
         crossing = Dot3(away, g.n) <= 0.01f;
       }
+      // Hole: already below a flat portal's plane and still sinking into it. This also counts during the standing block: a crossing refused
+      // for one frame (mid-relocation) used to leave the skater falling through the open floor for the whole block (floor fall-through,
+      // run 181). Sinking (moving into the portal) cannot be the standing ping-pong the block is for.
+      bool sinking = false;
+      if (!crossing && hole && g.Flat() && inside && Dot3(rel, g.n) < 0.0f && Dot3(rel, g.n) > -3.0f) {
+        const float away[3] = {pos[0] - g_prev[0], pos[1] - g_prev[1], pos[2] - g_prev[2]};
+        sinking = crossing = Dot3(away, g.n) < -0.01f;
+      }
       if (!crossing) continue;
       if (!allowed) {
         REXLOG_INFO("portal-gate: went through the {} portal but ignored it: not airborne (flags {:08X})",
@@ -1176,11 +1214,13 @@ bool Step(const float pos[3], bool allowed, unsigned flags, Cross* out) {
       out->exit_dir[0] = to.n[0];
       out->exit_dir[1] = to.n[2];
       out->lift = (hole || to.n[1] < -0.5f) ? 0.0f : 1.0f;  // a ceiling exit starts at head height, not lifted
+      std::copy(to.c, to.c + 3, out->exit_c);
+      std::copy(to.n, to.n + 3, out->exit_n);
       crossed = true;
       Sfx(2);
-      REXLOG_INFO("portal-gate: crossed {} portal at ({:.2f}, {:.2f}, {:.2f}) -> ({:.2f}, {:.2f}, {:.2f})",
+      REXLOG_INFO("portal-gate: crossed {} portal at ({:.2f}, {:.2f}, {:.2f}) -> ({:.2f}, {:.2f}, {:.2f}){}",
                   i ? "orange" : "blue", pos[0], pos[1], pos[2], out->exit_pos[0], out->exit_pos[1],
-                  out->exit_pos[2]);
+                  out->exit_pos[2], sinking ? " (sinking through the opening)" : "");
     }
   }
   if (crossed) {
