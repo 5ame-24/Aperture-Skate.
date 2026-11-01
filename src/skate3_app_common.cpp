@@ -1,6 +1,7 @@
 #include "skate3_app_common.h"
 
 #include "skate3_demo_path.h"
+#include "skate3_portal_chell.h"
 #include "skate3_fov.h"
 #include "skate3_iso_installer.h"
 #include "skate3_native_render.h"
@@ -681,6 +682,29 @@ void Skate3BaseApp::OnCreateDialogs(rex::ui::ImGuiDrawer* drawer) {
   // skate3_native_render_mode_indicator shows it live). Input-transparent,
   // so it never affects cursor or focus handling.
   render_mode_indicator_ = std::make_unique<skate3::RenderModeIndicator>(drawer);
+  portal_gate_overlay_ = std::make_unique<skate3::portal_gate::Overlay>(drawer);
+  rex::ui::RegisterBind("bind_skate3_portal_blue", "Ctrl+1", "Portal gate: place blue ring",
+                        [] { skate3::portal_gate::Request(0); });
+  rex::ui::RegisterBind("bind_skate3_portal_orange", "Ctrl+2", "Portal gate: place orange ring",
+                        [] { skate3::portal_gate::Request(1); });
+  rex::ui::RegisterBind("bind_skate3_portal_clear", "Ctrl+3", "Portal gate: clear rings",
+                        [] { skate3::portal_gate::Request(2); });
+  rex::ui::RegisterBind("bind_skate3_portal_fpv", "Ctrl+4", "Portal gate: first-person view",
+                        [] { skate3::portal_gate::ToggleFpv(); });
+  rex::ui::RegisterBind("bind_skate3_portal_cube", "Ctrl+5", "Portal gate: spawn the companion cube",
+                        [] { skate3::portal_cube::RequestSpawn(); });
+  rex::ui::RegisterBind("bind_skate3_portal_grindcapture", "Ctrl+8", "Portal gate: log the game's grind probes for 8 s",
+                        [] { skate3::portal_gate::RequestGrindCapture(); });
+  rex::ui::RegisterBind("bind_skate3_portal_chell", "Ctrl+0", "Portal gate: Chell in place of the skater (experimental)",
+                        [] { skate3::portal_chell::Toggle(); });
+  rex::ui::RegisterBind("bind_skate3_portal_adopt", "Ctrl+9", "Portal gate: make the nearest game prop the companion cube (again: release it)",
+                        [] { skate3::portal_gate::RequestAdopt(); });
+  rex::ui::RegisterBind("bind_skate3_portal_wake", "Ctrl+7", "Portal gate: wake the sleeping props around the skater",
+                        [] { skate3::portal_gate::RequestWake(); });
+  rex::ui::RegisterBind("bind_skate3_portal_selftest", "Ctrl+6", "Portal gate: self-test (drop / toss the nearest prop into the portals)",
+                        [] { skate3::portal_gate::RequestSelfTest(); });
+  rex::ui::RegisterBind("bind_skate3_portal_grab", "Ctrl+G", "Portal gate: grab / drop the companion cube",
+                        [] { skate3::portal_cube::RequestGrab(); });
   rex::ui::RegisterBind("bind_skate3_menu", "Escape", "Skate 3 settings", [this] {
     // Escape backs out of the settings screen level by level (rows ->
     // category rail -> closed); when the screen is closed it opens it.
@@ -760,6 +784,17 @@ void Skate3BaseApp::OnPostSetup() {
           REXCVAR_GET(skate3_native_render_scene_freecam_capture_input);
       return !settings_visible && !xam_ui_active && !freecam_captures;
     });
+    input_system->SetGuestPadFilter([](rex::input::X_INPUT_GAMEPAD* g) {
+      uint16_t b = static_cast<uint16_t>(g->buttons);
+      int16_t rx = static_cast<int16_t>(g->thumb_rx), ry = static_cast<int16_t>(g->thumb_ry);
+      uint8_t lt = g->left_trigger, rt = g->right_trigger;
+      skate3::portal_gate::FilterPad(&b, &lt, &rt, &rx, &ry);
+      g->buttons = b;
+      g->thumb_rx = rx;
+      g->thumb_ry = ry;
+      g->left_trigger = lt;
+      g->right_trigger = rt;
+    });
     input_system->SetMenuChordCallback([this]() {
       app_context().CallInUIThreadDeferred([this]() { ToggleSimpleSettings(); });
     });
@@ -825,6 +860,7 @@ void Skate3BaseApp::OnShutdown() {
   simple_settings_dialog_.reset();
   native_debug_dialog_.reset();
   render_mode_indicator_.reset();
+  portal_gate_overlay_.reset();
 }
 
 void Skate3BaseApp::ToggleSimpleSettings() {

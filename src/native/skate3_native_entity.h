@@ -152,6 +152,13 @@ bool ReadEntityWorldRows(uint8_t* base, uint32_t ctx, float out_rows[12]);
 void NoteAcceptedWorldCompare(const float bank_rows[12],
                               const float ent_rows[12]);
 
+// World translation of the first live skater-family entity with a non-zero
+// translation (entity+416 block, translation in component 3 of each row).
+// False when none is bound or the read faults.
+bool SkaterWorldPos(uint8_t* base, float out[3]);
+// The skater-family entity closest to `hint` within max_dist (frame-to-frame tracking of the human).
+bool SkaterWorldPosNear(uint8_t* base, const float hint[3], float max_dist, float out[3]);
+
 // Rate-limited ident[] stats line; call once per built frame.
 void EmitStats();
 

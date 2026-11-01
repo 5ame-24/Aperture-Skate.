@@ -833,6 +833,26 @@ struct RendererState {
   // no z-write): darken = straight alpha, default = additive glow.
   nrhi::Pipeline* pso_spline_darken = nullptr;
   nrhi::Pipeline* pso_spline_default = nullptr;
+  // Portal gun surfaces (skate3_portal_gate): flat-colour polygons drawn with the spline pipeline; 1x1 textures:
+  // 0/1 = blue/orange rim, 2/3 = blue/orange dark core.
+  GuestTexture portal_tex[4];
+  // Companion cube (skate3_portal_cube): 1x1 colours, group * 4 + shade (group 0 panel border, 1 inner panel, 2 pink heart; shade 0
+  // = lit .. 3 = dark), [12] = a soft black shadow.
+  GuestTexture cube_tex[13];
+  GuestTexture gun_tex[4];
+  GuestTexture chell_tex[4];  // Chell's textures (skate3_portal_chell)  // the Portal gun model's textures (skate3_portal_gunmodel)
+  // See-through portals: the world seen through portal i, rendered by a second item pass from a virtual camera and
+  // resolved here (scene HDR format, output size). Rests in RENDER_TARGET; portal_view_psr tracks the sampled state.
+  // pso_portal_view = the spline darken pixel shader (non-HDR variant, so colours pass through unchanged), opaque.
+  nrhi::Pipeline* pso_portal_view = nullptr;
+  // The spline darken pipeline with depth WRITE on: the companion cube writes its own depth so portal polygons drawn after it
+  // (and anything else) can be hidden behind it.
+  nrhi::Pipeline* pso_spline_zwrite = nullptr;
+  nrhi::Texture* portal_view[2] = {};
+  nrhi::TextureView* portal_view_srv[2] = {};
+  bool portal_view_psr[2] = {};
+  uint32_t portal_view_w = 0, portal_view_h = 0;
+  nrhi::Format portal_view_fmt = nrhi::Format::kUnknown;
   // Dynamic CSM shadows: casters render
   // into a 3-tile (depth, coverage) atlas with MIN blend (depth clear 1,
   // "uncoverage" clear 1 -> covered texels write 0), then the game's exact

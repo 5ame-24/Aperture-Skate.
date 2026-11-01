@@ -4,6 +4,7 @@
 // skate3_native_scene_gpu.cpp; state shared between the two is in
 // skate3_native_scene_state.h.
 
+#include "skate3_portal_gate.h"
 #include "skate3_native_scene.h"
 
 #include "generated/skate3_init.h"
@@ -6172,7 +6173,8 @@ FreecamState g_freecam;
 // scene.proj and scene.cam_pos then hold the flown pose.
 bool UpdateFreecam(FrameScene& scene, const float cam_view[16], double now) {
   FreecamState& fc = g_freecam;
-  if (!REXCVAR_GET(skate3_native_render_scene_freecam)) {
+  const bool portal_fpv = skate3::portal_gate::FpvActive();
+  if (!REXCVAR_GET(skate3_native_render_scene_freecam) && !portal_fpv) {
     if (fc.engaged) {
       fc.engaged = false;
       g_freecam_guest_active.store(0, std::memory_order_release);
@@ -6306,6 +6308,33 @@ bool UpdateFreecam(FrameScene& scene, const float cam_view[16], double now) {
   for (int j = 0; j < 3; ++j) {
     fc.vel[j] += (tvel[j] - fc.vel[j]) * vel_k;
     fc.pos[j] += fc.vel[j] * dt;
+  }
+  if (portal_fpv && !REXCVAR_GET(skate3_native_render_scene_freecam)) {
+    // Portal first-person view: the camera sits at the skater's head and the mouse (SDL relative motion, read in
+    // the portal overlay) looks around. No flying: position is overwritten every frame.
+    double dyaw = 0.0, dpitch = 0.0;
+    skate3::portal_gate::FpvConsumeLook(&dyaw, &dpitch);
+    fc.yaw += dyaw * fc.look_sign_x;
+    fc.pitch = std::clamp(fc.pitch + dpitch * fc.look_sign_y, -kPitchMax, kPitchMax);
+    double travel_yaw = 0.0;
+    if (skate3::portal_gate::FpvAutoYaw(&travel_yaw)) {
+      // ease the view toward where the skater is heading, and level it out
+      constexpr double kPi = 3.14159265358979323846;
+      double d = travel_yaw - fc.yaw;
+      d -= 2.0 * kPi * std::floor((d + kPi) / (2.0 * kPi));
+      if (d > kPi) d -= 2.0 * kPi;
+      fc.yaw += d * (dt > 0.0 ? 1.0 - std::exp(-dt / 0.35) : 0.0);
+      fc.pitch += (-0.08 - fc.pitch) * (dt > 0.0 ? 1.0 - std::exp(-dt / 0.5) : 0.0);
+    }
+    float head[3];
+    if (skate3::portal_gate::FpvHeadPos(head)) {
+      const double cp2 = std::cos(fc.pitch);
+      const double fx = std::sin(fc.yaw) * cp2, fy = std::sin(fc.pitch), fz = std::cos(fc.yaw) * cp2;
+      fc.pos[0] = head[0] + fx * 0.25;  // a little ahead of the head so the skater's own model is behind the lens
+      fc.pos[1] = head[1] + fy * 0.25;
+      fc.pos[2] = head[2] + fz * 0.25;
+      fc.vel[0] = fc.vel[1] = fc.vel[2] = 0.0;
+    }
   }
 
   // Compose and publish: view columns = right/up/forward, translation row

@@ -3,6 +3,10 @@
 // it through the RHI (D3D12 / Vulkan) into the guest output texture. Shared
 // cross-thread state lives in skate3_native_scene_state.h.
 
+#include "skate3_portal_cube.h"
+#include "skate3_portal_gunmodel.h"
+#include "skate3_portal_chell.h"
+#include "skate3_portal_gate.h"
 #include "skate3_native_debug_dialog.h"
 #include "skate3_native_scene.h"
 
@@ -18,6 +22,7 @@
 #include <condition_variable>
 #include <cstdio>
 #include <cstring>
+#include <functional>
 #include <deque>
 #include <ctime>
 #include <filesystem>
@@ -1076,6 +1081,7 @@ bool DecodeMesh(nrhi::Device* device, uint8_t* base, const DrawItem& item,
   // Stretch-veto probe (see g_skin_probe): cache ~32 decoded sample verts
   // so the guest thread can cheaply skin what the GPU will actually draw.
   if (item.skinned) {
+    skate3::portal_chell::Capture(item.mesh, dst, num_verts);  // the skater's rest-pose skin, for Chell's weights
     constexpr uint32_t kProbe = 32;
     const uint32_t pn = std::min(kProbe, num_verts);
     SkinProbe probe;
@@ -3162,7 +3168,7 @@ bool EnsureSplinePsos(const NativeGuestOutputRenderContext& context) {
     // states (spline.xml): darken = straight alpha, default = additive.
     // Under HDR the pixel shaders encode through the tone chain's inverse
     // (SplineOut) so the host tonemap restores the authored look.
-    for (nrhi::Pipeline** p : {&g_r.pso_spline_darken, &g_r.pso_spline_default}) {
+    for (nrhi::Pipeline** p : {&g_r.pso_spline_darken, &g_r.pso_spline_default, &g_r.pso_portal_view, &g_r.pso_spline_zwrite}) {
       if (*p != nullptr) {
         device->DestroyDeferred(*p);
         *p = nullptr;
@@ -3237,6 +3243,29 @@ bool EnsureSplinePsos(const NativeGuestOutputRenderContext& context) {
     sp.blend.src_alpha = nrhi::BlendFactor::kOne;
     sp.blend.dst_alpha = nrhi::BlendFactor::kOne;
     g_r.pso_spline_default = device->CreateGraphicsPipeline(sp);
+    {
+      // See-through portals: the plain (non-HDR) darken shader returns the texture colour unchanged at intensity 1,
+      // drawn opaque; the HDR variant would run the tone-chain inverse over values that are already scene-space.
+      nrhi::Shader* ppd = device->CreateShader(
+          MakeShaderDesc(nrhi::ShaderStage::kPixel, "spline.hlsl", kShaderSplineSource, "ps_darken", nullptr, ""));
+      if (ppd != nullptr) {
+        sp.ps = ppd;
+        sp.blend.enable = false;
+        g_r.pso_portal_view = device->CreateGraphicsPipeline(sp);
+        device->DestroyDeferred(ppd);
+      }
+    }
+    {
+      sp.ps = spk;  // the darken shader again, straight alpha, but writing depth
+      sp.blend.enable = true;
+      sp.blend.src = nrhi::BlendFactor::kSrcAlpha;
+      sp.blend.dst = nrhi::BlendFactor::kInvSrcAlpha;
+      sp.blend.src_alpha = nrhi::BlendFactor::kSrcAlpha;
+      sp.blend.dst_alpha = nrhi::BlendFactor::kInvSrcAlpha;
+      sp.depth.write_enable = true;
+      g_r.pso_spline_zwrite = device->CreateGraphicsPipeline(sp);
+      sp.depth.write_enable = false;
+    }
     device->DestroyDeferred(svs);
     device->DestroyDeferred(spd);
     device->DestroyDeferred(spk);
@@ -3986,6 +4015,115 @@ bool EnsureFallbackTextures(const NativeGuestOutputRenderContext& context) {
     }
     g_r.white_cube.valid = true;
   }
+  // Portal gun surface colours (skate3_portal_gate): 1x1 solid textures the spline pixel shader turns into flat
+  // opaque colour (straight-alpha pass, intensity 1, alpha 1).
+  {
+    static constexpr uint8_t kPortalColors[4][4] = {{41, 150, 255, 255},  // blue rim
+                                                    {255, 140, 20, 255},  // orange rim
+                                                    {8, 30, 70, 255},     // blue core
+                                                    {70, 28, 4, 255}};    // orange core
+    for (int i = 0; i < 4; ++i) {
+      GuestTexture& t = g_r.portal_tex[i];
+      if (t.valid) continue;
+      nrhi::TextureDesc desc;
+      desc.width = 1;
+      desc.height = 1;
+      desc.format = nrhi::Format::kR8G8B8A8_UNORM;
+      desc.initial_state = nrhi::ResourceState::kCopyDest;
+      t.texture = device->CreateTexture(desc);
+      t.upload = t.texture ? CreateUploadBuffer(device, 256, nrhi::BufferBindClass::kCopySrc) : nullptr;
+      if (t.texture == nullptr || t.upload == nullptr) {
+        g_r.failed = true;
+        return false;
+      }
+      uint8_t* mapping = static_cast<uint8_t*>(device->Map(t.upload));
+      std::memcpy(mapping, kPortalColors[i], 4);
+      device->Unmap(t.upload);
+      context.cmd->CopyBufferToTexture(t.texture, 0, 0, t.upload, 0, 256, 1, 1, 1);
+      context.cmd->Barrier(t.texture, nrhi::ResourceState::kCopyDest, nrhi::ResourceState::kPixelShaderResource);
+      g_r.device->DestroyDeferred(t.upload);
+      t.upload = nullptr;
+      nrhi::TextureViewDesc vd;
+      vd.mip_levels = 1;
+      t.srv = device->CreateTextureView(t.texture, vd);
+      if (t.srv == nullptr) {
+        g_r.failed = true;
+        return false;
+      }
+      t.valid = true;
+    }
+  }
+  // Companion cube colours (skate3_portal_cube), same recipe as the portal colours above.
+  {
+    static constexpr uint8_t kGroups[3][3] = {{206, 206, 212}, {112, 114, 124}, {255, 100, 160}};
+    static constexpr float kShade[4] = {1.0f, 0.82f, 0.64f, 0.48f};
+    for (int i = 0; i < 13; ++i) {
+      GuestTexture& t = g_r.cube_tex[i];
+      if (t.valid) continue;
+      uint8_t rgba[4] = {0, 0, 0, 72};
+      if (i < 12) {
+        for (int c = 0; c < 3; ++c) rgba[c] = uint8_t(float(kGroups[i / 4][c]) * kShade[i % 4]);
+        rgba[3] = 255;
+      }
+      nrhi::TextureDesc desc;
+      desc.width = 1;
+      desc.height = 1;
+      desc.format = nrhi::Format::kR8G8B8A8_UNORM;
+      desc.initial_state = nrhi::ResourceState::kCopyDest;
+      t.texture = device->CreateTexture(desc);
+      t.upload = t.texture ? CreateUploadBuffer(device, 256, nrhi::BufferBindClass::kCopySrc) : nullptr;
+      if (t.texture == nullptr || t.upload == nullptr) {
+        g_r.failed = true;
+        return false;
+      }
+      uint8_t* mapping = static_cast<uint8_t*>(device->Map(t.upload));
+      std::memcpy(mapping, rgba, 4);
+      device->Unmap(t.upload);
+      context.cmd->CopyBufferToTexture(t.texture, 0, 0, t.upload, 0, 256, 1, 1, 1);
+      context.cmd->Barrier(t.texture, nrhi::ResourceState::kCopyDest, nrhi::ResourceState::kPixelShaderResource);
+      g_r.device->DestroyDeferred(t.upload);
+      t.upload = nullptr;
+      nrhi::TextureViewDesc vd;
+      vd.mip_levels = 1;
+      t.srv = device->CreateTextureView(t.texture, vd);
+      if (t.srv == nullptr) {
+        g_r.failed = true;
+        return false;
+      }
+      t.valid = true;
+    }
+  }
+  // The Portal gun's textures (from the user's own Portal 2 install via the local cache); missing = no 3D gun, never an error.
+  const auto upload_model_textures = [&](const skate3::portal_gun::Model* gm, GuestTexture* arr) {
+    if (gm == nullptr) return;
+    for (size_t i = 0; i < gm->tex.size() && i < 4; ++i) {
+      GuestTexture& t = arr[i];
+      const skate3::portal_gun::Tex& src = gm->tex[i];
+      if (t.valid || t.texture != nullptr) continue;
+      const uint32_t pitch = (src.w * 4u + (nrhi::kRowPitchAlignment - 1u)) & ~(nrhi::kRowPitchAlignment - 1u);
+      nrhi::TextureDesc desc;
+      desc.width = src.w;
+      desc.height = src.h;
+      desc.format = nrhi::Format::kR8G8B8A8_UNORM;
+      desc.initial_state = nrhi::ResourceState::kCopyDest;
+      t.texture = device->CreateTexture(desc);
+      t.upload = t.texture ? CreateUploadBuffer(device, uint64_t(pitch) * src.h, nrhi::BufferBindClass::kCopySrc) : nullptr;
+      if (t.texture == nullptr || t.upload == nullptr) continue;
+      uint8_t* mapping = static_cast<uint8_t*>(device->Map(t.upload));
+      for (uint32_t y = 0; y < src.h; ++y) std::memcpy(mapping + size_t(y) * pitch, src.rgba.data() + size_t(y) * src.w * 4, size_t(src.w) * 4);
+      device->Unmap(t.upload);
+      context.cmd->CopyBufferToTexture(t.texture, 0, 0, t.upload, 0, pitch, src.w, src.h, 1);
+      context.cmd->Barrier(t.texture, nrhi::ResourceState::kCopyDest, nrhi::ResourceState::kPixelShaderResource);
+      g_r.device->DestroyDeferred(t.upload);
+      t.upload = nullptr;
+      nrhi::TextureViewDesc vd;
+      vd.mip_levels = 1;
+      t.srv = device->CreateTextureView(t.texture, vd);
+      t.valid = t.srv != nullptr;
+    }
+  };
+  upload_model_textures(skate3::portal_gun::Get(), g_r.gun_tex);
+  upload_model_textures(skate3::portal_gun::GetChell(), g_r.chell_tex);
   return true;
 }
 
@@ -4139,6 +4277,106 @@ bool EnsureOutputSizedTargets(const NativeGuestOutputRenderContext& context) {
     g_r.targets_scene_fmt = want_scene_fmt;
     g_r.targets_msaa = g_r.msaa;
   }
+  return true;
+}
+
+// 4x4 row-major helpers for the see-through camera (row-vector convention: p * M).
+void PortalMul4(const float a[16], const float b[16], float out[16]) {
+  for (int r = 0; r < 4; ++r) {
+    for (int c = 0; c < 4; ++c) {
+      float sum = 0.0f;
+      for (int k = 0; k < 4; ++k) sum += a[r * 4 + k] * b[k * 4 + c];
+      out[r * 4 + c] = sum;
+    }
+  }
+}
+
+bool PortalInvert4(const float m[16], float out[16]) {
+  double a[4][8];
+  for (int r = 0; r < 4; ++r) {
+    for (int c = 0; c < 4; ++c) {
+      a[r][c] = m[r * 4 + c];
+      a[r][4 + c] = r == c ? 1.0 : 0.0;
+    }
+  }
+  for (int col = 0; col < 4; ++col) {
+    int piv = col;
+    for (int r = col + 1; r < 4; ++r) {
+      if (std::abs(a[r][col]) > std::abs(a[piv][col])) piv = r;
+    }
+    if (std::abs(a[piv][col]) < 1e-12) return false;
+    if (piv != col) {
+      for (int c = 0; c < 8; ++c) std::swap(a[piv][c], a[col][c]);
+    }
+    const double d = a[col][col];
+    for (int c = 0; c < 8; ++c) a[col][c] /= d;
+    for (int r = 0; r < 4; ++r) {
+      if (r == col) continue;
+      const double f = a[r][col];
+      for (int c = 0; c < 8; ++c) a[r][c] -= f * a[col][c];
+    }
+  }
+  for (int r = 0; r < 4; ++r) {
+    for (int c = 0; c < 4; ++c) out[r * 4 + c] = float(a[r][4 + c]);
+  }
+  return true;
+}
+
+// The view-projection for the world around the exit portal as seen from the virtual camera: `inv` (exit space -> the
+// space the real camera sees) then the real view-projection, with its near plane swapped for the exit portal's plane
+// (oblique near-plane clipping) so the wall slab between the virtual camera and the opening is cut away.
+bool PortalViewProj(const float inv[16], const float vp[16], const float plane[4], float out[16]) {
+  PortalMul4(inv, vp, out);
+  float minv[16];
+  if (!PortalInvert4(out, minv)) return false;
+  float pc[4];  // the plane in clip space: minv * plane (column)
+  for (int i = 0; i < 4; ++i) {
+    pc[i] = minv[i * 4 + 0] * plane[0] + minv[i * 4 + 1] * plane[1] + minv[i * 4 + 2] * plane[2] + minv[i * 4 + 3] * plane[3];
+  }
+  // The far-plane corner the plane reaches furthest: keep it on the far plane (z = w) so depth range survives.
+  const float s = (pc[0] >= 0.0f ? pc[0] : -pc[0]) + (pc[1] >= 0.0f ? pc[1] : -pc[1]) + pc[2] + pc[3];
+  if (!(s > 1e-6f)) return false;
+  const float k = 1.0f / s;
+  for (int r = 0; r < 4; ++r) out[r * 4 + 2] = k * plane[r];
+  return true;
+}
+
+// Per-portal see-through textures (resolved virtual views); rebuilt on output-size or scene-format change.
+bool EnsurePortalViews(const NativeGuestOutputRenderContext& context) {
+  const uint32_t w = context.guest_output_width, h = context.guest_output_height;
+  if (g_r.portal_view[0] != nullptr && g_r.portal_view_w == w && g_r.portal_view_h == h &&
+      g_r.portal_view_fmt == g_r.hdr_scene_format) {
+    return true;
+  }
+  for (int i = 0; i < 2; ++i) {
+    if (g_r.portal_view_srv[i] != nullptr) g_r.device->DestroyDeferred(g_r.portal_view_srv[i]);
+    if (g_r.portal_view[i] != nullptr) g_r.device->DestroyDeferred(g_r.portal_view[i]);
+    g_r.portal_view_srv[i] = nullptr;
+    g_r.portal_view[i] = nullptr;
+    g_r.portal_view_psr[i] = false;
+  }
+  for (int i = 0; i < 2; ++i) {
+    nrhi::TextureDesc d;
+    d.width = w;
+    d.height = h;
+    d.mip_levels = 1;
+    d.format = g_r.hdr_scene_format;
+    d.usage = nrhi::kTextureUsageRenderTarget;
+    d.initial_state = nrhi::ResourceState::kRenderTarget;
+    g_r.portal_view[i] = g_r.device->CreateTexture(d);
+    if (g_r.portal_view[i] != nullptr) {
+      nrhi::TextureViewDesc vd;
+      vd.mip_levels = 1;
+      g_r.portal_view_srv[i] = g_r.device->CreateTextureView(g_r.portal_view[i], vd);
+    }
+    if (g_r.portal_view[i] == nullptr || g_r.portal_view_srv[i] == nullptr) {
+      REXLOG_WARN("native-scene: portal see-through target creation failed");
+      return false;
+    }
+  }
+  g_r.portal_view_w = w;
+  g_r.portal_view_h = h;
+  g_r.portal_view_fmt = g_r.hdr_scene_format;
   return true;
 }
 
@@ -8302,6 +8540,11 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
   // cost. Sampled once per RenderScene call; the per-item clock reads only
   // happen while the cvar is on.
   const bool prof_items = REXCVAR_GET(skate3_native_render_scene_perf_items);
+  // The camera draw_item renders from: the scene's own, or a portal's virtual camera during a see-through pass.
+  const float* view_vp = scene.view_proj;
+  const float* view_cam = scene.cam_pos;
+  bool virtual_pass = false;
+  const float* world_override = nullptr;  // a clone's world matrix (item.world * the portal pair transform)
   const auto draw_item = [&](const DrawItem& item) {
     // Stage split points (profiling only): t0..t1 mesh serve, t1..t2 texture
     // serve, t2..t3 constants assembly, t3..end binds + draw recording.
@@ -8805,7 +9048,7 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
       di_t2 = PerfClock::now();
     }
     float constants[52] = {};
-    std::memcpy(constants, item.world, sizeof(item.world));
+    std::memcpy(constants, world_override != nullptr ? world_override : item.world, sizeof(item.world));
     if (item.unlit) {
       // sky.*: the dome mesh is CAMERA-RELATIVE (sky.fx defaultVS adds
       // g_vViewPos to every vertex). Anchoring it at the world origin put
@@ -8814,16 +9057,16 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
       // in x/z but pins Y at the level's fixed sky elevation (captured per
       // frame from the sky draw's VS bank; 165.0 in every capture); using
       // cam.y rendered the skyline ~160 m too LOW.
-      constants[12] += scene.cam_pos[0];
+      constants[12] += view_cam[0];
       constants[13] += scene.sky_height;
-      constants[14] += scene.cam_pos[2];
+      constants[14] += view_cam[2];
     }
     float* mvp = constants + 16;
     for (int r = 0; r < 4; ++r) {
       for (int c = 0; c < 4; ++c) {
         float sum = 0.0f;
         for (int k = 0; k < 4; ++k) {
-          sum += constants[r * 4 + k] * scene.view_proj[k * 4 + c];
+          sum += constants[r * 4 + k] * view_vp[k * 4 + c];
         }
         mvp[r * 4 + c] = sum;
       }
@@ -8874,9 +9117,9 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
                           ? -1.0f
                           : 0.0f;
     }
-    constants[36] = scene.cam_pos[0];
-    constants[37] = scene.cam_pos[1];
-    constants[38] = scene.cam_pos[2];
+    constants[36] = view_cam[0];
+    constants[37] = view_cam[1];
+    constants[38] = view_cam[2];
     // cam_pos.w = character shading family: > 0 switches the PS to the
     // captured character-lighting branch (rows uploaded to b2 below);
     // char_rows[14*4+1] stays 0 when the capture failed validation, which
@@ -9449,7 +9692,7 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
     // SSR: record reflective items, env fams 5/6/13 on their exact branch
     // with live spec masks (the reflection mask rides t4.z), plus water,
     // for the reflection G-buffer pass after the scene pass.
-    if (ssr_on && !item.skinned &&
+    if (ssr_on && !virtual_pass && !item.skinned &&
         (item.water ||
          ((item.env_family == 5 || item.env_family == 6 ||
            item.env_family == 13) &&
@@ -9702,7 +9945,9 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
   // occlusion-proven-hidden items cost CPU here but can never contribute
   // pixels; a large share in either class is a visibility-culling gap, not
   // a scene-density cost.
+  std::function<bool(const DrawItem&)> hide_item;  // set later: the adopted prop's own look, the skater's character when Chell is on
   const auto timed_draw = [&](const DrawItem& item) {
+    if (hide_item && hide_item(item)) return;
     if (!prof_items) {
       draw_item(item);
       return;
@@ -9754,7 +9999,7 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
     }
     float d2 = 0.0f;
     for (int a = 0; a < 3; ++a) {
-      const float d = w[a] - scene.cam_pos[a];
+      const float d = w[a] - view_cam[a];
       d2 += d * d;
     }
     return d2;
@@ -10045,8 +10290,607 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
     std::stable_sort(opaque_items.begin(), opaque_items.end(),
                      [](const auto& a, const auto& b) { return a.first < b.first; });
   }
+  // Portal clones: skater, board, NPCs and props (dyn_entity items) that are partly through a portal are drawn again
+  // at the other portal (item.world * pair transform). Real pass: unclipped, since what lies behind the exit's plane
+  // is hidden by the wall and the portal's own polygon. Only things whose centre has reached the opening get a clone,
+  // so nothing ghosts behind an exit wall while it is still approaching.
+  const uint32_t ui_region =
+      uint32_t(frame_number % RendererState::kUiRegions) * RendererState::kUiRegionSize;
+  uint32_t ui_offset = 0;
+  const auto item_centre = [&](const DrawItem& it, float c[3]) {
+    if (it.skinned && it.bones.size() >= 12) {
+      c[0] = it.bones[3];
+      c[1] = it.bones[7];
+      c[2] = it.bones[11];
+      return true;
+    }
+    if (it.skinned || it.cloth_quads) {
+      return false;
+    }
+    const float m[3] = {(it.bbox_min[0] + it.bbox_max[0]) * 0.5f, (it.bbox_min[1] + it.bbox_max[1]) * 0.5f,
+                        (it.bbox_min[2] + it.bbox_max[2]) * 0.5f};
+    for (int a = 0; a < 3; ++a) {
+      c[a] = m[0] * it.world[a] + m[1] * it.world[4 + a] + m[2] * it.world[8 + a] + it.world[12 + a];
+    }
+    return true;
+  };
+  const auto draw_clones = [&](int from) {
+    float fwd[16], pc[3], pn[3], pr[3], pu[3];
+    if (!skate3::portal_gate::PortalFrame(from, fwd, pc, pn, pr, pu)) {
+      return;
+    }
+    int drawn = 0;
+    const bool was_virtual = virtual_pass;
+    for (const auto& [dist, item] : opaque_items) {
+      float c[3];
+      if (!item->dyn_entity || item->retained || !item_centre(*item, c)) {
+        continue;
+      }
+      const float rel[3] = {c[0] - pc[0], c[1] - pc[1], c[2] - pc[2]};
+      const float depth = rel[0] * pn[0] + rel[1] * pn[1] + rel[2] * pn[2];
+      const float lat = rel[0] * pr[0] + rel[1] * pr[1] + rel[2] * pr[2];
+      const float vert = rel[0] * pu[0] + rel[1] * pu[1] + rel[2] * pu[2];
+      if (depth > 1.2f || depth < -4.0f || std::abs(lat) > 4.0f || std::abs(vert) > 3.5f) {
+        continue;
+      }
+      float w[16];
+      PortalMul4(item->world, fwd, w);
+      world_override = w;
+      virtual_pass = true;  // keeps the clone out of the SSR capture
+      timed_draw(*item);
+      world_override = nullptr;
+      virtual_pass = was_virtual;
+      if (++drawn >= 48) {
+        break;
+      }
+    }
+  };
+  // A portal's frame drawn flat into the current pass with the given view-projection (used inside see-through views).
+  const auto draw_flat_portal = [&](const skate3::portal_gate::SurfaceShape& sh, const float* vp) {
+    for (int layer = 0; layer < 2; ++layer) {
+      const uint32_t count = uint32_t(sh.count);
+      const uint32_t bytes = count * 28;
+      if (count < 3 || ui_offset + bytes > RendererState::kUiRegionSize) {
+        continue;
+      }
+      float* out = reinterpret_cast<float*>(g_r.ui_ring_cpu + ui_region + ui_offset);
+      const float(*pts)[3] = layer == 0 ? sh.rim : sh.core;
+      int lo = 0, hi = int(count) - 1;
+      for (uint32_t k = 0; k < count; ++k) {
+        const int idx = (k % 2 == 0) ? lo++ : hi--;
+        float* v = out + k * 7;
+        v[0] = pts[idx][0];
+        v[1] = pts[idx][1];
+        v[2] = pts[idx][2];
+        v[3] = 1.0f;
+        v[4] = 0.0f;
+        v[5] = 0.0f;
+        v[6] = 1.0f;
+      }
+      cmd->SetPipeline(g_r.pso_spline_darken);
+      float consts[20];
+      std::memcpy(consts, vp, sizeof(float) * 16);
+      consts[16] = 1.0f;
+      consts[17] = 1.0f;
+      consts[18] = 0.0f;
+      consts[19] = 3.0f;
+      cmd->SetRootConstants(0, 20, consts, 0);
+      cmd->SetTexture(1, g_r.portal_tex[(layer == 0 ? 0 : 2) + sh.portal_index].srv);
+      cmd->SetVertexBuffer(g_r.ui_ring, ui_region + ui_offset, bytes, 28);
+      cmd->SetPrimitiveTopology(nrhi::PrimitiveTopology::kTriangleStrip);
+      cmd->Draw(count, 0);
+      ui_offset += bytes;
+    }
+    cmd->SetPipeline(scene_pso_bound);
+  };
+  // The companion cube: its visible faces as flat-shaded layers (border, inner panel, pink heart) through the spline darken
+  // pipeline, lit by a fixed sun direction. `xf` (row-vector 4x4, or null) carries it through a portal for the clone.
+  const auto emit_tris = [&](const std::vector<float>& xyz, int tex, const float* vp, bool zwrite) {
+    const uint32_t count = uint32_t(xyz.size() / 3);
+    const uint32_t bytes = count * 28;
+    if (count < 3 || ui_offset + bytes > RendererState::kUiRegionSize) {
+      return;
+    }
+    float* out = reinterpret_cast<float*>(g_r.ui_ring_cpu + ui_region + ui_offset);
+    for (uint32_t k = 0; k < count; ++k) {
+      float* v = out + k * 7;
+      v[0] = xyz[k * 3];
+      v[1] = xyz[k * 3 + 1];
+      v[2] = xyz[k * 3 + 2];
+      v[3] = 1.0f;
+      v[4] = 0.0f;
+      v[5] = 0.0f;
+      v[6] = 1.0f;
+    }
+    cmd->SetPipeline(zwrite && g_r.pso_spline_zwrite != nullptr ? g_r.pso_spline_zwrite : g_r.pso_spline_darken);
+    float consts[20];
+    std::memcpy(consts, vp, sizeof(float) * 16);
+    consts[16] = 1.0f;
+    consts[17] = 1.0f;
+    consts[18] = 0.0f;
+    consts[19] = 3.0f;
+    cmd->SetRootConstants(0, 20, consts, 0);
+    cmd->SetTexture(1, g_r.cube_tex[tex].srv);
+    cmd->SetVertexBuffer(g_r.ui_ring, ui_region + ui_offset, bytes, 28);
+    cmd->SetPrimitiveTopology(nrhi::PrimitiveTopology::kTriangleList);
+    cmd->Draw(count, 0);
+    ui_offset += bytes;
+  };
+  const auto draw_cube = [&](const float* vp, const float* xf) {
+    skate3::portal_cube::Draw cd;
+    if (!g_r.cube_tex[0].valid || g_r.ui_ring_cpu == nullptr || g_r.pso_spline_darken == nullptr ||
+        !skate3::portal_cube::Snapshot(&cd)) {
+      return;
+    }
+    float c[3] = {cd.c[0], cd.c[1], cd.c[2]};
+    float ax[3][3];
+    for (int a = 0; a < 3; ++a) {
+      for (int k = 0; k < 3; ++k) ax[a][k] = cd.axes[a][k];
+    }
+    if (xf != nullptr) {
+      const float c0[3] = {c[0], c[1], c[2]};
+      for (int k = 0; k < 3; ++k) c[k] = c0[0] * xf[k] + c0[1] * xf[4 + k] + c0[2] * xf[8 + k] + xf[12 + k];
+      for (int a = 0; a < 3; ++a) {
+        const float d0[3] = {ax[a][0], ax[a][1], ax[a][2]};
+        for (int k = 0; k < 3; ++k) ax[a][k] = d0[0] * xf[k] + d0[1] * xf[4 + k] + d0[2] * xf[8 + k];
+      }
+    }
+    const float half = skate3::portal_cube::kHalf;
+    // A soft shadow on the ground below (not on a clone: the clone's ground is the other side's).
+    if (xf == nullptr && cd.has_ground && c[1] - cd.ground[1] < 8.0f && std::abs(c[0] - cd.ground[0]) < 2.5f &&
+        std::abs(c[2] - cd.ground[2]) < 2.5f) {
+      std::vector<float> disc;
+      const float r = half * (1.25f + 0.15f * (c[1] - cd.ground[1]));
+      for (int k = 0; k < 16; ++k) {
+        const float a0 = 6.2831853f * float(k) / 16.0f, a1 = 6.2831853f * float(k + 1) / 16.0f;
+        const float pts[3][2] = {{0.0f, 0.0f}, {std::cos(a0) * r, std::sin(a0) * r}, {std::cos(a1) * r, std::sin(a1) * r}};
+        for (const auto& q : pts) {
+          disc.push_back(c[0] + q[0]);
+          disc.push_back(cd.ground[1] + 0.03f);
+          disc.push_back(c[2] + q[1]);
+        }
+      }
+      emit_tris(disc, 12, vp, false);
+    }
+    static const float kSun[3] = {0.33f, 0.84f, 0.43f};
+    // Heart outline in face coordinates (x right, y up), a star-shaped ring about (0, 0.1).
+    static float heart[24][2];
+    static bool heart_ready = false;
+    if (!heart_ready) {
+      for (int k = 0; k < 24; ++k) {
+        const float t = 6.2831853f * float(k) / 24.0f;
+        heart[k][0] = 16.0f * std::pow(std::sin(t), 3.0f) / 17.0f;
+        heart[k][1] = (13.0f * std::cos(t) - 5.0f * std::cos(2 * t) - 2.0f * std::cos(3 * t) - std::cos(4 * t)) / 17.0f + 0.2f;
+      }
+      heart_ready = true;
+    }
+    for (int a = 0; a < 3; ++a) {
+      for (int sgn = -1; sgn <= 1; sgn += 2) {
+        const float n[3] = {ax[a][0] * sgn, ax[a][1] * sgn, ax[a][2] * sgn};
+        const float fc[3] = {c[0] + n[0] * half, c[1] + n[1] * half, c[2] + n[2] * half};
+        const float to_cam[3] = {view_cam[0] - fc[0], view_cam[1] - fc[1], view_cam[2] - fc[2]};
+        if (to_cam[0] * n[0] + to_cam[1] * n[1] + to_cam[2] * n[2] <= 0.0f) {
+          continue;  // facing away
+        }
+        const float* u = ax[(a + 1) % 3];
+        const float* v = ax[(a + 2) % 3];
+        const float lit = n[0] * kSun[0] + n[1] * kSun[1] + n[2] * kSun[2];
+        const int shade = lit > 0.55f ? 0 : (lit > 0.15f ? 1 : (lit > -0.3f ? 2 : 3));
+        const auto at = [&](float fu, float fv, float lift, float* out) {
+          for (int k = 0; k < 3; ++k) out[k] = fc[k] + n[k] * lift + u[k] * fu + v[k] * fv;
+        };
+        for (int layer = 0; layer < 2; ++layer) {
+          const float h = layer == 0 ? half : half * 0.72f, lift = layer == 0 ? 0.004f : 0.012f;
+          float q[4][3];
+          at(-h, -h, lift, q[0]);
+          at(h, -h, lift, q[1]);
+          at(h, h, lift, q[2]);
+          at(-h, h, lift, q[3]);
+          std::vector<float> quad;
+          for (const int idx : {0, 1, 2, 0, 2, 3}) quad.insert(quad.end(), q[idx], q[idx] + 3);
+          emit_tris(quad, layer * 4 + shade, vp, true);
+        }
+        std::vector<float> hv;
+        const float hs = half * 0.42f;
+        float centre[3];
+        at(0.0f, 0.1f * hs, 0.02f, centre);
+        for (int k = 0; k < 24; ++k) {
+          float p0[3], p1[3];
+          at(heart[k][0] * hs, heart[k][1] * hs, 0.02f, p0);
+          at(heart[(k + 1) % 24][0] * hs, heart[(k + 1) % 24][1] * hs, 0.02f, p1);
+          hv.insert(hv.end(), centre, centre + 3);
+          hv.insert(hv.end(), p0, p0 + 3);
+          hv.insert(hv.end(), p1, p1 + 3);
+        }
+        emit_tris(hv, 8 + shade, vp, true);
+      }
+    }
+    cmd->SetPipeline(scene_pso_bound);
+  };
+  // The cube's copy at the other portal when it is partly through (same window as the item clones).
+  const auto draw_cube_clone = [&](int from, const float* vp) {
+    float fwd[16], pc[3], pn[3], pr[3], pu[3];
+    skate3::portal_cube::Draw cd;
+    if (!skate3::portal_gate::PortalFrame(from, fwd, pc, pn, pr, pu) || !skate3::portal_cube::Snapshot(&cd)) {
+      return;
+    }
+    const float rel[3] = {cd.c[0] - pc[0], cd.c[1] - pc[1], cd.c[2] - pc[2]};
+    const float depth = rel[0] * pn[0] + rel[1] * pn[1] + rel[2] * pn[2];
+    const float lat = rel[0] * pr[0] + rel[1] * pr[1] + rel[2] * pr[2];
+    const float vert = rel[0] * pu[0] + rel[1] * pu[1] + rel[2] * pu[2];
+    if (depth > 1.2f || depth < -4.0f || std::abs(lat) > 4.0f || std::abs(vert) > 3.5f) {
+      return;
+    }
+    draw_cube(vp, fwd);
+  };
+  // The adopted prop's own look: a dyn_entity item whose bounding-box centre (not its origin: a bench's origin sits at one end) is at the prop.
+  const auto adopted_look = [&](const DrawItem* it) {
+    if (!it->dyn_entity || !skate3::portal_cube::ExternalActive()) return false;
+    const float lc[3] = {(it->bbox_min[0] + it->bbox_max[0]) * 0.5f, (it->bbox_min[1] + it->bbox_max[1]) * 0.5f, (it->bbox_min[2] + it->bbox_max[2]) * 0.5f};
+    float c[3];
+    for (int k = 0; k < 3; ++k) c[k] = lc[0] * it->world[k] + lc[1] * it->world[4 + k] + lc[2] * it->world[8 + k] + it->world[12 + k];
+    return skate3::portal_cube::HidesItemAt(c);
+  };
+  // Chell: the skater's own skinned parts this frame (palette root near the tracked skater), Build once, hide the skater's items, draw her.
+  std::vector<skate3::portal_chell::Palette> chell_pals;
+  std::unordered_set<uint32_t> chell_entities, chell_meshes;
+  bool chell_on = false;
+  if (use_depth && debug_mode == 0 && !loading_native && skate3::portal_chell::Wanted()) {
+    float sk[3];
+    if (skate3::portal_gate::TrackedPos(sk)) {
+      // The skater's parts: the first Build takes the skinned parts within 1.8 m of the tracked point (each part has its own palette root, so
+      // there is no shared skeleton root to match). After that only those same meshes count, so NPCs walking close keep their own look.
+      const auto consider = [&](const DrawItem* it) {
+        if (!it->skinned || it->bones.size() < 12 || !skate3::portal_chell::Captured(it->mesh) || skate3::portal_chell::IsBoard(it->mesh)) return;
+        const float* b = it->bones.data();
+        const float d[3] = {b[3] - sk[0], b[7] - sk[1], b[11] - sk[2]};
+        const float d2 = d[0] * d[0] + d[1] * d[1] + d[2] * d[2];
+        if (skate3::portal_chell::Ready()) {
+          if (!skate3::portal_chell::IsPart(it->mesh)) {
+            static std::unordered_set<uint32_t> logged;
+            if (d2 < 1.5f * 1.5f && logged.size() < 40 && logged.insert(it->mesh).second)
+              REXLOG_INFO("portal-chell: other skinned mesh {:08X} near the skater ({:.2f} m, {} bones, entity {:08X})", it->mesh, std::sqrt(d2),
+                          it->bones.size() / 12, it->lw_entity);
+            return;
+          }
+        } else if (d2 > 1.8f * 1.8f) {
+          return;
+        }
+        if (chell_meshes.insert(it->mesh).second) chell_pals.push_back({it->mesh, b, uint32_t(it->bones.size() / 12)});
+        if (it->lw_entity) chell_entities.insert(it->lw_entity);
+      };
+      for (const auto& [dist, it] : opaque_items) consider(it);
+      for (const DrawItem* it : transparent_items) consider(it);
+      static int chell_diag_sets = 0;
+      static std::unordered_set<uint32_t> chell_last_set;
+      if (chell_meshes != chell_last_set && chell_diag_sets++ < 60) {
+        std::string ids;
+        for (uint32_t id : chell_meshes) ids += fmt::format(" {:08X}", id);
+        REXLOG_INFO("portal-chell: skater's skeleton now draws {} parts:{} ", chell_meshes.size(), ids);
+      }
+      chell_last_set = chell_meshes;
+      static int chell_diag = 0;
+      if (chell_pals.empty() && (chell_diag++ % 120) == 0) {
+        int skinned = 0, captured = 0;
+        float best = 1e9f;
+        const auto probe = [&](const DrawItem* it) {
+          if (!it->skinned || it->bones.size() < 12) return;
+          ++skinned;
+          if (skate3::portal_chell::Captured(it->mesh)) ++captured;
+          const float* b = it->bones.data();
+          const float d[3] = {b[3] - sk[0], b[7] - sk[1], b[11] - sk[2]};
+          best = std::min(best, std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]));
+        };
+        for (const auto& [dist, it] : opaque_items) probe(it);
+        for (const DrawItem* it : transparent_items) probe(it);
+        REXLOG_INFO("portal-chell: no skater parts (skinned items {} captured {} nearest palette root {:.2f} m)", skinned, captured, best);
+      }
+      if (!chell_pals.empty()) {
+        if (!skate3::portal_chell::Ready()) {
+          std::vector<uint32_t> parts;
+          for (const auto& p : chell_pals) parts.push_back(p.mesh);
+          skate3::portal_chell::Build(parts);
+        }
+        chell_on = skate3::portal_chell::Ready() && skate3::portal_chell::Skin(chell_pals);
+      }
+    }
+  }
+  hide_item = [&](const DrawItem& it) {
+    if (adopted_look(&it)) return true;
+    return chell_on && it.dyn_entity && (chell_meshes.count(it.mesh) != 0 || (it.lw_entity != 0 && chell_entities.count(it.lw_entity) != 0));
+  };
+  // Chell herself: her skinned vertices (CPU skinning with the skater's palettes), drawn indexed with her own textures.
+  const auto draw_chell = [&](const float* vp) {
+    const skate3::portal_gun::Model* cm = skate3::portal_gun::GetChell();
+    if (!chell_on || cm == nullptr || g_r.ui_ring_cpu == nullptr || g_r.pso_spline_zwrite == nullptr) return;
+    for (size_t m = 0; m < cm->mesh.size(); ++m) {
+      const skate3::portal_gun::Mesh& mesh = cm->mesh[m];
+      const std::vector<float>& pos = skate3::portal_chell::Positions(m);
+      const uint32_t nv = uint32_t(mesh.vtx.size() / 8), ni = uint32_t(mesh.idx.size());
+      const uint32_t vbytes = nv * 28, ibytes = (ni * 2 + 3) & ~3u;
+      if (nv < 3 || ni < 3 || pos.size() != size_t(nv) * 3 || mesh.tex >= 4 || !g_r.chell_tex[mesh.tex].valid ||
+          ui_offset + vbytes + ibytes > RendererState::kUiRegionSize) {
+        continue;
+      }
+      float* out = reinterpret_cast<float*>(g_r.ui_ring_cpu + ui_region + ui_offset);
+      for (uint32_t k = 0; k < nv; ++k) {
+        float* o = out + k * 7;
+        o[0] = pos[size_t(k) * 3];
+        o[1] = pos[size_t(k) * 3 + 1];
+        o[2] = pos[size_t(k) * 3 + 2];
+        o[3] = 1.0f;
+        o[4] = mesh.vtx[size_t(k) * 8 + 6];
+        o[5] = mesh.vtx[size_t(k) * 8 + 7];
+        o[6] = 1.0f;
+      }
+      std::memcpy(g_r.ui_ring_cpu + ui_region + ui_offset + vbytes, mesh.idx.data(), ni * 2);
+      cmd->SetPipeline(g_r.pso_spline_zwrite);
+      float consts[20];
+      std::memcpy(consts, vp, sizeof(float) * 16);
+      consts[16] = 1.0f;
+      consts[17] = 1.0f;
+      consts[18] = 0.0f;
+      consts[19] = 3.0f;
+      cmd->SetRootConstants(0, 20, consts, 0);
+      cmd->SetTexture(1, g_r.chell_tex[mesh.tex].srv);
+      cmd->SetVertexBuffer(g_r.ui_ring, ui_region + ui_offset, vbytes, 28);
+      cmd->SetIndexBuffer(g_r.ui_ring, ui_region + ui_offset + vbytes, ni * 2);
+      cmd->SetPrimitiveTopology(nrhi::PrimitiveTopology::kTriangleList);
+      cmd->DrawIndexed(ni, 0, 0);
+      ui_offset += vbytes + ibytes;
+    }
+    cmd->SetPipeline(scene_pso_bound);
+  };
+  // The Portal gun in 3D: in first person it hangs at the lower right of the view, in third person at the skater's side; either way
+  // it points through the crosshair and kicks back when a portal is fired. Model space: barrel along +z.
+  const auto draw_gun = [&](const float* vp) {
+    const skate3::portal_gun::Model* gm = skate3::portal_gun::Get();
+    if (gm == nullptr || !skate3::portal_gate::GunVisible() || !g_r.gun_tex[0].valid || g_r.ui_ring_cpu == nullptr ||
+        g_r.pso_spline_zwrite == nullptr) {
+      return;
+    }
+    float inv[16];
+    if (!PortalInvert4(vp, inv)) return;
+    const auto unproj = [&](float x, float y, float z, float* o) {
+      float h[4];
+      for (int k = 0; k < 4; ++k) h[k] = x * inv[k] + y * inv[4 + k] + z * inv[8 + k] + inv[12 + k];
+      for (int k = 0; k < 3; ++k) o[k] = h[k] / h[3];
+    };
+    const auto norm = [](float* v) {
+      const float l = std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+      if (l > 1e-6f) for (int k = 0; k < 3; ++k) v[k] /= l;
+    };
+    float cam[3] = {scene.cam_pos[0], scene.cam_pos[1], scene.cam_pos[2]};
+    float za[3], zb[3];
+    unproj(0, 0, 0.2f, za);
+    unproj(0, 0, 0.8f, zb);
+    const auto dist2 = [&](const float* p) { return (p[0] - cam[0]) * (p[0] - cam[0]) + (p[1] - cam[1]) * (p[1] - cam[1]) + (p[2] - cam[2]) * (p[2] - cam[2]); };
+    const float zn = dist2(za) < dist2(zb) ? 0.2f : 0.8f, zf = zn == 0.2f ? 0.8f : 0.2f;  // near / far depth value (either convention)
+    float fwd[3], right[3], up[3], a0[3], a1[3];
+    unproj(0, 0, zn, a0);
+    unproj(0, 0, zf, a1);
+    for (int k = 0; k < 3; ++k) fwd[k] = a1[k] - a0[k];
+    norm(fwd);
+    unproj(0.5f, 0, 0.5f, a0);
+    unproj(-0.5f, 0, 0.5f, a1);
+    for (int k = 0; k < 3; ++k) right[k] = a0[k] - a1[k];
+    norm(right);
+    unproj(0, 0.5f, 0.5f, a0);
+    unproj(0, -0.5f, 0.5f, a1);
+    for (int k = 0; k < 3; ++k) up[k] = a0[k] - a1[k];
+    norm(up);
+    // the barrel points through the crosshair
+    float ax = 0.0f, ay = 0.0f, aim[3], p0[3], p1[3];
+    skate3::portal_gate::AimNdc(&ax, &ay);
+    unproj(ax, ay, zn, p0);
+    unproj(ax, ay, zf, p1);
+    for (int k = 0; k < 3; ++k) aim[k] = p1[k] - p0[k];
+    norm(aim);
+    float anchor[3];
+    float sk[3];
+    if (skate3::portal_gate::FpvActive() || !skate3::portal_gate::TrackedPos(sk)) {
+      for (int k = 0; k < 3; ++k) anchor[k] = cam[k] + right[k] * 0.20f - up[k] * 0.17f + fwd[k] * 0.42f;
+    } else {
+      for (int k = 0; k < 3; ++k) anchor[k] = sk[k] + right[k] * 0.34f + fwd[k] * 0.30f;
+      anchor[1] += 0.25f;  // the tracked point is about hip height
+    }
+    int which = 0;
+    const float kick = skate3::portal_gate::GunKick(&which);
+    for (int k = 0; k < 3; ++k) anchor[k] -= aim[k] * 0.06f * kick;
+    // frame: B = barrel (aim), U = camera up made square to it, R = U x B
+    float B[3] = {aim[0], aim[1], aim[2]}, U[3], R[3];
+    const float d = up[0] * B[0] + up[1] * B[1] + up[2] * B[2];
+    for (int k = 0; k < 3; ++k) U[k] = up[k] - B[k] * d;
+    norm(U);
+    R[0] = U[1] * B[2] - U[2] * B[1];
+    R[1] = U[2] * B[0] - U[0] * B[2];
+    R[2] = U[0] * B[1] - U[1] * B[0];
+    const float scale = 0.0254f * (skate3::portal_gate::FpvActive() ? 0.9f : 0.8f);  // (the first size, which the user liked)
+    static const float kPivot[3] = {-5.8f, 48.5f, 8.0f};
+    for (const skate3::portal_gun::Mesh& mesh : gm->mesh) {
+      const uint32_t nv = uint32_t(mesh.vtx.size() / 8), ni = uint32_t(mesh.idx.size());
+      const uint32_t vbytes = nv * 28, ibytes = (ni * 2 + 3) & ~3u;
+      if (nv < 3 || ni < 3 || mesh.tex >= 4 || !g_r.gun_tex[mesh.tex].valid || ui_offset + vbytes + ibytes > RendererState::kUiRegionSize) continue;
+      float* out = reinterpret_cast<float*>(g_r.ui_ring_cpu + ui_region + ui_offset);
+      for (uint32_t k = 0; k < nv; ++k) {
+        const float* v = &mesh.vtx[size_t(k) * 8];
+        const float lx = (v[0] - kPivot[0]) * scale, ly = (v[1] - kPivot[1]) * scale, lz = (v[2] - kPivot[2]) * scale;
+        float* o = out + k * 7;
+        for (int c = 0; c < 3; ++c) o[c] = anchor[c] + R[c] * lx + U[c] * ly + B[c] * lz;
+        o[3] = 1.0f;
+        o[4] = v[6];
+        o[5] = v[7];
+        o[6] = 1.0f;
+      }
+      std::memcpy(g_r.ui_ring_cpu + ui_region + ui_offset + vbytes, mesh.idx.data(), ni * 2);
+      cmd->SetPipeline(g_r.pso_spline_zwrite);
+      float consts[20];
+      std::memcpy(consts, vp, sizeof(float) * 16);
+      consts[16] = 1.0f;
+      consts[17] = 1.0f;
+      consts[18] = 0.0f;
+      consts[19] = 3.0f;
+      cmd->SetRootConstants(0, 20, consts, 0);
+      cmd->SetTexture(1, g_r.gun_tex[mesh.tex].srv);
+      cmd->SetVertexBuffer(g_r.ui_ring, ui_region + ui_offset, vbytes, 28);
+      cmd->SetIndexBuffer(g_r.ui_ring, ui_region + ui_offset + vbytes, ni * 2);
+      cmd->SetPrimitiveTopology(nrhi::PrimitiveTopology::kTriangleList);
+      cmd->DrawIndexed(ni, 0, 0);
+      ui_offset += vbytes + ibytes;
+    }
+    cmd->SetPipeline(scene_pso_bound);
+  };
+  // ---- See-through portals (skate3_portal_gate_seethru) ----
+  // Per visible portal: draw the opaque items again from a virtual camera on the far side of the other portal (oblique
+  // clip at that portal's plane), resolve into that portal's texture, then clear and carry on with the real frame. The
+  // texture fills the portal's core polygon in the portal-surface block below. Limits: only what the game kept in this
+  // frame's draw list shows (it culls by the real camera), transparents are left out, and portals do not show in portals.
+  bool portal_see[2] = {false, false};
+  if (msaa_on && hdr_on && use_depth && debug_mode == 0 && !loading_native && g_r.pso_portal_view != nullptr &&
+      g_r.portal_tex[0].valid && g_r.ui_ring_cpu != nullptr && !opaque_items.empty() && EnsurePortalViews(context)) {
+    skate3::portal_gate::SurfaceShape views[2];
+    const int view_count = skate3::portal_gate::SurfaceShapes(views);
+    for (int vi = 0; vi < view_count; ++vi) {
+      const int pi = views[vi].portal_index;
+      float inv[16], fwd[16], plane[4], vvp[16];
+      if (!skate3::portal_gate::ViewThrough(pi, scene.cam_pos, inv, fwd, plane)) continue;
+      // Skip portals that are off screen (every rim point outside one frustum side).
+      int out_x_lo = 0, out_x_hi = 0, out_y_lo = 0, out_y_hi = 0, behind = 0;
+      for (int k = 0; k < views[vi].count; ++k) {
+        const float* q = views[vi].rim[k];
+        float cl[4];
+        for (int c = 0; c < 4; ++c) {
+          cl[c] = q[0] * scene.view_proj[c] + q[1] * scene.view_proj[4 + c] + q[2] * scene.view_proj[8 + c] +
+                  scene.view_proj[12 + c];
+        }
+        out_x_lo += cl[0] < -cl[3];
+        out_x_hi += cl[0] > cl[3];
+        out_y_lo += cl[1] < -cl[3];
+        out_y_hi += cl[1] > cl[3];
+        behind += cl[2] < 0.0f;
+      }
+      const int pts = views[vi].count;
+      if (out_x_lo == pts || out_x_hi == pts || out_y_lo == pts || out_y_hi == pts || behind == pts) continue;
+      if (!PortalViewProj(inv, scene.view_proj, plane, vvp)) continue;
+      float vcam[3];
+      for (int c = 0; c < 3; ++c) {
+        vcam[c] = scene.cam_pos[0] * fwd[c] + scene.cam_pos[1] * fwd[4 + c] + scene.cam_pos[2] * fwd[8 + c] + fwd[12 + c];
+      }
+      if (g_r.portal_view_psr[pi]) {
+        cmd->Barrier(g_r.portal_view[pi], nrhi::ResourceState::kPixelShaderResource, nrhi::ResourceState::kRenderTarget);
+        g_r.portal_view_psr[pi] = false;
+      }
+      cmd->ClearRenderTarget(scene_color, clear_color);
+      cmd->ClearDepth(g_r.depth, 1.0f);
+      cmd->SetRenderTargets(scene_color, g_r.depth);
+      cmd->SetViewport(viewport);
+      cmd->SetScissor(scissor);
+      cmd->SetPipeline(scene_pso_bound);
+      virtual_pass = true;
+      view_vp = vvp;
+      view_cam = vcam;
+      for (const auto& [dist, item] : opaque_items) {
+        if (adopted_look(item)) continue;  // the adopted prop wears the cube
+        timed_draw(*item);
+      }
+      draw_clones(pi);
+      draw_cube(vvp, nullptr);
+      draw_cube_clone(pi, vvp);
+      if (!transparent_items.empty() && g_r.pso_transparent != nullptr) {
+        // Water, glass, fences, mist: the plain blended items, back to front from the virtual camera (the special
+        // hair / fading-character / canopy-glass routes stay out of the view).
+        std::vector<const DrawItem*> blended;
+        for (const DrawItem* ti : transparent_items) {
+          const bool hair = ti->char_family >= 4 && ti->char_family <= 5 && ti->char_rows[14 * 4 + 1] > 0.0f;
+          if (!hair && !char_fade_zwrite(*ti) && ti->env_family != 13) blended.push_back(ti);
+        }
+        std::stable_sort(blended.begin(), blended.end(),
+                         [&](const DrawItem* a, const DrawItem* b) { return view_dist2(*a) > view_dist2(*b); });
+        cmd->SetPipeline(g_r.pso_transparent);
+        for (const DrawItem* ti : blended) timed_draw(*ti);
+        cmd->SetPipeline(scene_pso_bound);
+      }
+      virtual_pass = false;
+      // The portal being looked through is itself part of the far-side world (facing pairs see it).
+      {
+        const float to_cam[3] = {vcam[0] - views[vi].core[0][0], vcam[1] - views[vi].core[0][1],
+                                 vcam[2] - views[vi].core[0][2]};
+        float fw[16], c0[3], n0[3], r0[3], u0[3];
+        if (skate3::portal_gate::PortalFrame(pi, fw, c0, n0, r0, u0) &&
+            to_cam[0] * n0[0] + to_cam[1] * n0[1] + to_cam[2] * n0[2] > 0.0f) {
+          draw_flat_portal(views[vi], vvp);
+        }
+      }
+      view_vp = scene.view_proj;
+      view_cam = scene.cam_pos;
+      cmd->Barrier(g_r.msaa_color, nrhi::ResourceState::kRenderTarget, nrhi::ResourceState::kPixelShaderResource);
+      cmd->FlushBarriers();
+      cmd->SetRenderTargets(g_r.portal_view[pi], nullptr);
+      cmd->SetPipeline(g_r.resolve_pso);
+      cmd->SetTexture(1, g_r.msaa_srv_slot);
+      cmd->SetPrimitiveTopology(nrhi::PrimitiveTopology::kTriangleList);
+      cmd->Draw(3, 0);
+      cmd->Barrier(g_r.msaa_color, nrhi::ResourceState::kPixelShaderResource, nrhi::ResourceState::kRenderTarget);
+      cmd->Barrier(g_r.portal_view[pi], nrhi::ResourceState::kRenderTarget, nrhi::ResourceState::kPixelShaderResource);
+      cmd->FlushBarriers();
+      g_r.portal_view_psr[pi] = true;
+      portal_see[pi] = true;
+      static uint32_t s_see_logged = 0;
+      if (s_see_logged++ < 6 || (s_see_logged & 1023u) == 0) {
+        REXLOG_INFO("native-scene: portal see-through pass {} ({} items) cam=({:.1f},{:.1f},{:.1f}) -> ({:.1f},{:.1f},{:.1f})",
+                    pi, opaque_items.size(), scene.cam_pos[0], scene.cam_pos[1], scene.cam_pos[2], vcam[0], vcam[1],
+                    vcam[2]);
+      }
+    }
+    if (portal_see[0] || portal_see[1]) {
+      // Back to the real frame: fresh targets and the main-pass bindings the item loop expects.
+      cmd->SetRenderTargets(scene_color, g_r.depth);
+      cmd->ClearRenderTarget(scene_color, clear_color);
+      cmd->ClearDepth(g_r.depth, 1.0f);
+      cmd->SetViewport(viewport);
+      cmd->SetScissor(scissor);
+      cmd->SetPipeline(scene_pso_bound);
+      if (g_r.shadow_cb != nullptr) {
+        const uint32_t cb_offset =
+            uint32_t(frame_number % RendererState::kShadowCbRegions) * RendererState::kShadowCbSlice;
+        cmd->SetConstantBuffer(6, g_r.shadow_cb, cb_offset);
+        cmd->SetConstantBuffer(9, g_r.bone_ring, bone_region);
+      }
+    }
+  }
   for (const auto& [dist, item] : opaque_items) {
+    if (adopted_look(item)) continue;  // the adopted prop wears the cube
     timed_draw(*item);
+  }
+  {
+    // What is near the adopted prop (to see which item is its look), a few frames a second apart.
+    static int logged = 0;
+    static uint64_t last_frame = 0;
+    float ep[3];
+    if (logged < 24 && frame_number > last_frame + 60 && skate3::portal_cube::ExternalPos(ep)) {
+      last_frame = frame_number;
+      ++logged;
+      for (const auto& [dist, item] : opaque_items) {
+        const float lc[3] = {(item->bbox_min[0] + item->bbox_max[0]) * 0.5f, (item->bbox_min[1] + item->bbox_max[1]) * 0.5f, (item->bbox_min[2] + item->bbox_max[2]) * 0.5f};
+        float c[3];
+        for (int k = 0; k < 3; ++k) c[k] = lc[0] * item->world[k] + lc[1] * item->world[4 + k] + lc[2] * item->world[8 + k] + item->world[12 + k];
+        const float d = std::hypot(c[0] - ep[0], std::hypot(c[1] - ep[1], c[2] - ep[2]));
+        if (d < 3.0f) {
+          REXLOG_INFO("portal-cube: item near the adopted prop at ({:.2f},{:.2f},{:.2f}): bbox centre {:.2f} m away, origin ({:.2f},{:.2f},{:.2f}), dyn_entity {}, extent ({:.2f},{:.2f},{:.2f})",
+                      ep[0], ep[1], ep[2], d, item->world[12], item->world[13], item->world[14], item->dyn_entity ? "yes" : "no",
+                      item->bbox_max[0] - item->bbox_min[0], item->bbox_max[1] - item->bbox_min[1], item->bbox_max[2] - item->bbox_min[2]);
+        }
+      }
+    }
+  }
+  if (use_depth && debug_mode == 0 && !loading_native) {
+    draw_clones(0);
+    draw_clones(1);
+    draw_cube(scene.view_proj, nullptr);
+    draw_cube_clone(0, scene.view_proj);
+    draw_cube_clone(1, scene.view_proj);
+    draw_chell(scene.view_proj);
+    draw_gun(scene.view_proj);
   }
   if (!transparent_items.empty() && g_r.pso_transparent != nullptr) {
     std::stable_sort(transparent_items.begin(), transparent_items.end(),
@@ -10335,9 +11179,6 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
     }
     return it->second.valid ? &it->second : &g_r.white;
   };
-  const uint32_t ui_region =
-      uint32_t(frame_number % RendererState::kUiRegions) * RendererState::kUiRegionSize;
-  uint32_t ui_offset = 0;
 
   // In-world neon splines (waypoint arrows / marker beams): replayed inside
   // the scene pass, depth-tested against the world like the emulated frame,
@@ -10385,6 +11226,125 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
       cmd->Draw(s.count, 0);
       ui_offset += bytes;
       ++drawn_spline;
+    }
+  }
+
+  // Portal gun surfaces (skate3_portal_gate): flat opaque polygons drawn with the spline pipeline (straight alpha,
+  // depth test on, no z-write), so walls, props and the skater in front of a portal hide it. A bright rim, then a
+  // dark core on top.
+  if (g_r.ui_ring_cpu != nullptr && g_r.pso_spline_darken != nullptr && g_r.portal_tex[0].valid) {
+    skate3::portal_gate::SurfaceShape shapes[2];
+    const int shape_count = skate3::portal_gate::SurfaceShapes(shapes);
+    for (int si = 0; si < shape_count; ++si) {
+      const skate3::portal_gate::SurfaceShape& sh = shapes[si];
+      {
+        // A portal is only there from its front: seen from behind (or from inside the floor) it is not drawn.
+        const float to_cam[3] = {scene.cam_pos[0] - sh.centre[0], scene.cam_pos[1] - sh.centre[1],
+                                 scene.cam_pos[2] - sh.centre[2]};
+        if (to_cam[0] * sh.normal[0] + to_cam[1] * sh.normal[1] + to_cam[2] * sh.normal[2] <= 0.02f) {
+          continue;
+        }
+      }
+      for (int layer = 0; layer < 2; ++layer) {
+        const uint32_t count = uint32_t(sh.count);
+        const uint32_t bytes = count * 28;
+        if (count < 3 || ui_offset + bytes > RendererState::kUiRegionSize) {
+          continue;
+        }
+        if (layer == 1 && portal_see[sh.portal_index]) {
+          // The core shows the portal's see-through texture. Vertices go in already projected (identity matrix,
+          // w = 1) with screen-space uvs, so the texture maps straight onto the screen with no perspective error;
+          // depth is the polygon's own, so props and the skater in front of the portal still hide it.
+          struct Clip4 { float x, y, z, w; };
+          Clip4 poly[28], cut[40];
+          for (uint32_t k = 0; k < count; ++k) {
+            const float* q = sh.core[k];
+            float cl[4];
+            for (int c = 0; c < 4; ++c) {
+              cl[c] = q[0] * scene.view_proj[c] + q[1] * scene.view_proj[4 + c] + q[2] * scene.view_proj[8 + c] +
+                      scene.view_proj[12 + c];
+            }
+            poly[k] = {cl[0], cl[1], cl[2], cl[3]};
+          }
+          uint32_t cut_n = 0;  // clip against the near plane (z >= 0)
+          for (uint32_t k = 0; k < count; ++k) {
+            const Clip4& a = poly[k];
+            const Clip4& b = poly[(k + 1) % count];
+            if (a.z >= 0.0f) cut[cut_n++] = a;
+            if ((a.z >= 0.0f) != (b.z >= 0.0f)) {
+              const float t = a.z / (a.z - b.z);
+              cut[cut_n++] = {a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t, 0.0f, a.w + (b.w - a.w) * t};
+            }
+          }
+          const uint32_t tex_bytes = cut_n * 28;
+          if (cut_n < 3 || ui_offset + tex_bytes > RendererState::kUiRegionSize) {
+            continue;
+          }
+          float* tv = reinterpret_cast<float*>(g_r.ui_ring_cpu + ui_region + ui_offset);
+          int lo = 0, hi = int(cut_n) - 1;
+          bool ok = true;
+          for (uint32_t k = 0; k < cut_n; ++k) {
+            const int idx = (k % 2 == 0) ? lo++ : hi--;
+            const Clip4& c = cut[idx];
+            if (!(c.w > 1e-5f)) {
+              ok = false;
+              break;
+            }
+            const float nx = c.x / c.w, ny = c.y / c.w, nz = c.z / c.w;
+            float* v = tv + k * 7;
+            v[0] = nx;
+            v[1] = ny;
+            v[2] = nz;
+            v[3] = 1.0f;
+            v[4] = 0.5f + 0.5f * nx;
+            v[5] = 0.5f - 0.5f * ny;
+            v[6] = 1.0f;
+          }
+          if (!ok) {
+            continue;
+          }
+          cmd->SetPipeline(g_r.pso_portal_view);
+          const float identity[20] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 1.0f, 1.0f, 0.0f, 3.0f};
+          cmd->SetRootConstants(0, 20, identity, 0);
+          cmd->SetTexture(1, g_r.portal_view_srv[sh.portal_index]);
+          cmd->SetVertexBuffer(g_r.ui_ring, ui_region + ui_offset, tex_bytes, 28);
+          cmd->SetPrimitiveTopology(nrhi::PrimitiveTopology::kTriangleStrip);
+          cmd->Draw(cut_n, 0);
+          ui_offset += tex_bytes;
+          continue;
+        }
+        // convex polygon as a triangle strip: 0, n-1, 1, n-2, ...
+        float* out = reinterpret_cast<float*>(g_r.ui_ring_cpu + ui_region + ui_offset);
+        const float(*pts)[3] = layer == 0 ? sh.rim : sh.core;
+        int lo = 0, hi = int(count) - 1;
+        for (uint32_t k = 0; k < count; ++k) {
+          const int idx = (k % 2 == 0) ? lo++ : hi--;
+          float* v = out + k * 7;
+          v[0] = pts[idx][0];
+          v[1] = pts[idx][1];
+          v[2] = pts[idx][2];
+          v[3] = 1.0f;
+          v[4] = 0.0f;
+          v[5] = 0.0f;
+          v[6] = 1.0f;  // fade
+        }
+        cmd->SetPipeline(g_r.pso_spline_darken);
+        float consts[20];
+        std::memcpy(consts, scene.view_proj, sizeof(float) * 16);
+        consts[16] = 1.0f;  // intensity x
+        consts[17] = 1.0f;  // intensity y: straight alpha, colour and alpha 1 -> opaque flat colour
+        consts[18] = 0.0f;
+        consts[19] = 3.0f;  // showcase gate: fully visible
+        cmd->SetRootConstants(0, 20, consts, 0);
+        cmd->SetTexture(1, g_r.portal_tex[(layer == 0 ? 0 : 2) + sh.portal_index].srv);
+        cmd->SetVertexBuffer(g_r.ui_ring, ui_region + ui_offset, bytes, 28);
+        cmd->SetPrimitiveTopology(nrhi::PrimitiveTopology::kTriangleStrip);
+        cmd->Draw(count, 0);
+        ui_offset += bytes;
+      }
+    }
+    if (shape_count > 0) {
+      skate3::portal_gate::NoteSurfaceDrawn();
     }
   }
 

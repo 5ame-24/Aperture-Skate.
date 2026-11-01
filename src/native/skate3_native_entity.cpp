@@ -500,6 +500,60 @@ bool ReadEntityWorldRows(uint8_t* base, uint32_t ctx, float out_rows[12]) {
          ReadWorldRowsChecked(base, info.entity, out_rows);
 }
 
+namespace {
+// Live skater-family entities (skater, colorized, CAC, aux) with their class.
+std::vector<std::pair<uint32_t, EntClass>> LiveSkaterEntities() {
+  std::vector<std::pair<uint32_t, EntClass>> out;
+  std::lock_guard<std::mutex> lock(g_mu);
+  for (const auto& [ent, rec] : g_entities) {
+    if (rec.view_refs > 0 && rec.cls != EntClass::kUnknown && rec.cls != EntClass::kLivingWorld) {
+      out.emplace_back(ent, rec.cls);
+    }
+  }
+  return out;
+}
+}  // namespace
+
+bool SkaterWorldPos(uint8_t* base, float out[3]) {
+  for (const auto& [entity, cls] : LiveSkaterEntities()) {
+    float rows[12];
+    if (!LoadF32Block(base, entity + kEntL2WTrans, rows, 12)) {
+      continue;
+    }
+    const float p[3] = {rows[3], rows[7], rows[11]};
+    // An all-zero translation is an unplaced entity, not a skater at the origin.
+    if (std::isfinite(p[0]) && std::isfinite(p[1]) && std::isfinite(p[2]) &&
+        std::abs(p[0]) + std::abs(p[1]) + std::abs(p[2]) > 0.01f) {
+      std::memcpy(out, p, sizeof(p));
+      return true;
+    }
+  }
+  return false;
+}
+
+bool SkaterWorldPosNear(uint8_t* base, const float hint[3], float max_dist, float out[3]) {
+  float best = max_dist;
+  bool found = false;
+  for (const auto& [entity, cls] : LiveSkaterEntities()) {
+    float rows[12];
+    if (!LoadF32Block(base, entity + kEntL2WTrans, rows, 12)) {
+      continue;
+    }
+    const float p[3] = {rows[3], rows[7], rows[11]};
+    if (!std::isfinite(p[0]) || !std::isfinite(p[1]) || !std::isfinite(p[2])) {
+      continue;
+    }
+    const float d = std::sqrt((p[0] - hint[0]) * (p[0] - hint[0]) + (p[1] - hint[1]) * (p[1] - hint[1]) +
+                              (p[2] - hint[2]) * (p[2] - hint[2]));
+    if (d < best) {
+      best = d;
+      std::memcpy(out, p, sizeof(p));
+      found = true;
+    }
+  }
+  return found;
+}
+
 bool ReadSkaterFade(uint8_t* base, uint32_t ctx, float* out_alpha) {
   if (!REXCVAR_GET(skate3_native_render_scene_entity_fade_serve)) {
     return false;

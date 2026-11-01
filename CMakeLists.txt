@@ -256,6 +256,12 @@ set(SKATE3_COMMON_SOURCES
     src/skate3_native_scene.cpp
     src/skate3_native_scene_gpu.cpp
     src/skate3_native_scene_post.cpp
+    src/skate3_portal.cpp
+    src/skate3_portal_probe.cpp
+    src/skate3_portal_gate.cpp
+    src/skate3_portal_cube.cpp
+    src/skate3_portal_gunmodel.cpp
+    src/skate3_portal_chell.cpp
     src/skate3_screenshot.cpp
     src/skate3_shader_disasm.cpp
     src/skate3_title_update_installer.cpp
