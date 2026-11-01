@@ -3,7 +3,7 @@
 Read CLAUDE.md first (stance, build/run, architecture, findings, run table). This file is the resume point: what is
 built, what is untested, what to do next, and how to analyse a run. Update it at the end of every working session.
 
-Last updated: 2026-10-30 (after run 092). Latest build compiles; the items under "Untested" have not been run.
+Last updated: 2026-11-01 (section 51; sections 19-50 newer than the list below). Latest build compiles; the items under "Untested" have not been run.
 
 ## State of the product
 Working (user-confirmed or measured):
@@ -113,8 +113,8 @@ Untested in the latest build (run it and report):
 4. See-through portal view: second camera pass or render-to-texture; the spline pipeline proves injection works.
 5. Velocity turning for angled portals and flings (turn the restored skeleton vectors and the board block rates).
 6. Portals acting on props and NPCs (their actors need the same atomic move-with-rates treatment).
-7. Cleanup: dead knobs in skate3_portal_probe.cpp (`false &&`), old learner profiles, SDK imgui pin notes, Portal 2 staging
-   folders (sigf/, portal2-skate-app/ in the Steam Portal 2 dir).
+7. Cleanup: probe dead code DONE (section 51). Left: SDK imgui pin notes (SDK repo), Portal 2 staging folders (sigf/,
+   portal2-skate-app/ in the Steam Portal 2 dir, not in this repo).
 Ideas parked: Chell-style boots are the no-bail mode above; bringing a Portal character model in would be a model-format
 reverse-engineering plus skeleton retarget project (the user's own Portal 2 install is the source); GTA-like drivable cars.
 
@@ -484,3 +484,19 @@ Actor offsets: +1200/+1216 ground pos, +1232 delta, +1248 velocity, +1296 flags,
     model for whoever is nearest the tracked point), normals/lighting (flat albedo), eyes (no texture), NPC skaters. Unverified: the donor palettes may be per-part (handled: each vertex
     uses its donor part's palette), the weight byte order, the Skate rest-pose orientation (the 8-way search), the bone-0 position test.
     Other Portal 2 characters available the same way: models/player/ballbot (Atlas), models/player/eggbot (P-body) with skins, models/npcs/glados, personality_sphere, turret.
+51. Probe cleanup (built here with -fsyntax-only against stub headers + unit test; not built on the Mac, untested in game). Only
+    skate3_portal_probe.cpp, default behaviour meant to be identical. Removed:
+    - The A/B learner: `Profile`/`kProfiles`, `SelectProfile`, `FinishScore`, stats file portal_gate_profiles6.txt (no longer read or
+      written), the "GATE learn:" line, cvar `skate3_portal_gate_ab`. Profile C (board move + restored skeleton, lift 1.0) is hard-wired:
+      `armed = hop || gate`, `t_surgery = gate && state != 500`. The "GATE profile C: board move + restored skeleton (crossing #N)" line is
+      kept word for word so crossings.py still splits on it.
+    - `false` branches: the hold-for-riding-state struct ("GATE held" line), the fastest-board-rate velocity pick (vin is the tracked
+      displacement, as before), the airmode flag rewrite.
+    - Code only those paths reached: `TurnLive` ("GATE turned N live velocity vectors in place", only when restore was off),
+      `WriteActor` + `g_move_target`/`g_move_k`/`g_delta_frames` (never called), `BodiesHolding` (no caller), `#include <random>`.
+    - cvars with no effect left: `skate3_portal_gate_airmode` (never read), `skate3_portal_gate_restore` (profile C restores anyway).
+      Passing any of the three removed cvars on the command line now does nothing or warns (SDK cvar parser; not checked).
+    Test: one normal run with the usual flags; a few wall<->wall and floor<->ceiling crossings, a carry, a prop drop. Expect the same
+    log as before: `GATE profile C ... (crossing #N)`, `GATE crossing with flags`, `GATE velocity in ... out`, `GATE teleport armed`,
+    `GATE board reset replaced`, `GATE speed after crossing` with kept speed like runs 160+. No `GATE learn` / `GATE held` lines.
+    If launch fails on an unknown flag, drop --skate3_portal_gate_ab/airmode/restore from the command line.

@@ -53,7 +53,7 @@ board or rider's head.
   `82BE3508` (zeroes ~26 skeleton vectors at skeleton+0x2770..0x2900). Skeleton = *(actor+1884), board = *(actor+1880),
   board block = *(board+12) (lin rates +0x140, ang +0x1B0, stride 16).
 - **The fix that works (run 082/086):** replace the board reset with `SetTransform 82C0B2C8` (keeps rates) and restore the
-  skeleton's zeroed vectors (profile C, `kDefaultProfile`). Kept 96% of speed (n=29), 92% mean/112% median (run 086,
+  skeleton's zeroed vectors (the old learner's profile C, now the only crossing path). Kept 96% of speed (n=29), 92% mean/112% median (run 086,
   n=24), no bails. Plain teleport kept 39%.
 - Writing actor fields (+1200/+1216 positions, +1232 delta, +1248 velocity) causes the flicker/respawn glitch: don't.
   Exit distance, lift, airmode, waiting for a riding state, board-rate heading: no effect on kept speed.
@@ -82,6 +82,6 @@ board or rider's head.
 - Next: (1) read the ray service / world collision offline (`8276EDD0`, `8276EE88`) for a wall cut-out; (2) see-through
   view (second camera pass; spline-style injection is the proven way into the renderer); (3) velocity turning for angled
   portals and flings (turn the restored skeleton vectors; floor portal needs a falling entry); (4) portals acting on
-  props and NPCs; (5) polish: wall "magnetism" after exits, state-100 crossings keep only ~45%, cleanup of probe code
-  (`false &&` knobs, old learner profiles) and Portal 2 staging folders (sigf/, portal2-skate-app/).
+  props and NPCs; (5) polish: wall "magnetism" after exits, state-100 crossings keep only ~45%, Portal 2 staging folders
+  (sigf/, portal2-skate-app/, outside the repo). Probe dead code removed (PROGRESS 51).
 - Horizon: drivable cars with a GTA-like feel (take over a traffic car, driving model from skate-vehicles research).

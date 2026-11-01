@@ -21,7 +21,6 @@
 #include <mutex>
 #include <unordered_map>
 #include <unordered_set>
-#include <random>
 #include <string>
 #include <vector>
 
@@ -57,27 +56,9 @@ REXCVAR_DEFINE_BOOL(skate3_portal_gate_cutout, false, "Skate 3",
     .debug_only()
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
-REXCVAR_DEFINE_BOOL(skate3_portal_gate_ab, false, "Skate 3",
-                    "Portal gate A/B test: cycle through 4 crossing setups (see kProfiles) and log which one is used, "
-                    "so one session shows which setup keeps the speed.")
-    .debug_only()
-    .lifecycle(rex::cvar::Lifecycle::kHotReload);
-
-REXCVAR_DEFINE_BOOL(skate3_portal_gate_airmode, true, "Skate 3",
-                    "Portal gate: present a rolling crossing to the game's teleport as an airborne one (ground bit "
-                    "cleared). The airborne teleport keeps the skeleton's velocities; the grounded one zeroes them.")
-    .debug_only()
-    .lifecycle(rex::cvar::Lifecycle::kHotReload);
-
 REXCVAR_DEFINE_BOOL(skate3_portal_gate_turn, true, "Skate 3",
                     "Portal gate: turn the board's velocity from the entry portal's frame to the exit portal's, so "
                     "portals on different walls, floors and ceilings redirect your speed like Portal. Applies to the vectors the restore puts back.")
-    .debug_only()
-    .lifecycle(rex::cvar::Lifecycle::kHotReload);
-
-REXCVAR_DEFINE_BOOL(skate3_portal_gate_restore, false, "Skate 3",
-                    "Portal gate crossings also write back the board/skeleton velocities the game's teleport "
-                    "zeroes (the speed-restore experiment). Off = the game's native behaviour.")
     .debug_only()
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
@@ -673,7 +654,6 @@ void Turn(const float m[9], const float v[3], float out[3]) {
 // The pair's matrix, applied to every velocity vector the restore puts back (linear and angular alike).
 float g_restore_m[9];
 bool g_restore_turn = false;
-bool g_turn_in_place = false;  // turn the live vectors after the teleport (when restore is not doing it)
 
 // The Teleporting state (700/702) ends in state 100 (riding) when bit 0 of this byte is set and state 500 (off the
 // board, speed gone) when it is clear. The byte is the skeleton's field at +10768 (skate-core's
@@ -691,35 +671,6 @@ void ForceOnBoard(uint8_t* base, uint32_t self, const char* when) {
     const uint32_t be = __builtin_bswap32(w | 0x01000000u);
     std::memcpy(base + skeleton + kOnBoardByte, &be, 4);
   }
-}
-
-// Turn, in place, every velocity vector the teleport leaves behind: the skeleton's body rates (+0x2770..+0x2900,
-// 16-byte stride, found by the scan), and the board block's 7 linear and 7 angular rates.
-void TurnLive(uint8_t* base, uint32_t self) {
-  uint32_t skeleton = 0, board = 0, block = 0;
-  ReadBe32(base, self + 1884, &skeleton);
-  const bool have_block = ReadBe32(base, self + 1880, &board) && ReadBe32(base, board + 12, &block);
-  int turned = 0;
-  auto one = [&](uint32_t addr) {
-    if (addr < 0x10000 || addr >= 0xC0000000 || (addr & 3)) return;
-    float v[3], o[3];
-    if (!ReadVec(base, addr, v)) return;
-    const float m = std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
-    if (!(m > 0.05f && m < 200.0f)) return;
-    Turn(g_restore_m, v, o);
-    for (int k = 0; k < 3; ++k) WriteBeFloat(base, addr + 4 * k, o[k]);
-    ++turned;
-  };
-  if (skeleton) {
-    for (uint32_t off = 0x2770; off <= 0x2900; off += 16) one(skeleton + off);
-  }
-  if (have_block) {
-    for (int i = 0; i < 7; ++i) {
-      one(block + 0x140 + 16 * i);
-      one(block + 0x1B0 + 16 * i);
-    }
-  }
-  REXLOG_INFO("portal-probe: GATE turned {} live velocity vectors in place", turned);
 }
 
 void TurnRaw(uint32_t w[3]) {
@@ -812,102 +763,19 @@ void ScanLog(uint8_t* base, const char* when) {
   }
 }
 
-// Crossing setups. Run 064 kept 6 m/s through a rolling crossing and later builds lost it, and one session cannot
-// say which change did it, so the gate tries each setup and scores it: after a crossing at >= 3 m/s, the mean
-// speed 15-30 frames later divided by the speed before (0 when the game bails or warps back). It tries every
-// setup twice, then mostly uses the best (15% of crossings still explore), and keeps the scores in
-// portal_gate_profiles.txt (working directory) for the next session.
-struct Profile {
-  bool restore;        // put back the velocity vectors the teleport zeroes (skeleton +0x2770.., block rates), turned
-  bool surgery;        // replace the executor's board reset (zeroes every rate) with the rate-preserving SetTransform
-  float lift;          // metres the feet start above the exit point (a ground-level exit loses the speed)
-  const char* name;
-};
-// Runs 074-079: no knob changed how much speed survives a grounded crossing, and writing the actor's position fields
-// causes the flicker/respawn glitch. The executor (82DB8998) always calls the board reset 82C05F50, which zeroes all
-// 14 board rates; skate-core's set_transform (82C0B2C8) moves the same assembly and keeps them. B swaps one for the
-// other inside the executor; C also restores the skeleton's zeroed vectors.
-constexpr int kProfileCount = 3;
-// Run 082: C kept 96% (n=29), B 88% (n=6), plain 39% (n=3) - so C is the default when the learner is off.
-constexpr int kDefaultProfile = 2;
-constexpr Profile kProfiles[kProfileCount] = {{false, false, 1.0f, "A: plain teleport"},
-                                              {false, true, 1.0f, "B: board move keeps rates"},
-                                              {true, true, 1.0f, "C: board move + restored skeleton"}};
-struct ProfStat {
-  int n = 0;
-  float sum = 0;
-};
-ProfStat g_stats[kProfileCount];
-bool g_stats_loaded = false;
-int g_next_prof = -1, g_cur_prof = -1, g_cross_count = 0;
-bool g_prof_restore = false;  // the profile of the crossing in progress wants the zeroed vectors put back
-float g_score_sum = 0;
-int g_score_n = 0;
-constexpr const char* kStatsFile = "portal_gate_profiles6.txt";
-
-void SaveStats() {
-  if (FILE* f = std::fopen(kStatsFile, "w")) {
-    for (const ProfStat& st : g_stats) std::fprintf(f, "%d %f\n", st.n, st.sum);
-    std::fclose(f);
-  }
-}
-
-int SelectProfile() {
-  if (!g_stats_loaded) {
-    g_stats_loaded = true;
-    if (FILE* f = std::fopen(kStatsFile, "r")) {
-      for (ProfStat& st : g_stats) {
-        if (std::fscanf(f, "%d %f", &st.n, &st.sum) != 2) st = ProfStat{};
-      }
-      std::fclose(f);
-    }
-  }
-  int least = 0;
-  for (int i = 1; i < kProfileCount; ++i) {
-    if (g_stats[i].n < g_stats[least].n) least = i;
-  }
-  if (g_stats[least].n < 2) return least;
-  static std::mt19937 rng{std::random_device{}()};
-  if (std::uniform_real_distribution<float>(0.0f, 1.0f)(rng) < 0.15f) {
-    return int(rng() % kProfileCount);
-  }
-  int best = 0;
-  for (int i = 1; i < kProfileCount; ++i) {
-    if (g_stats[i].sum / g_stats[i].n > g_stats[best].sum / g_stats[best].n) best = i;
-  }
-  return best;
-}
-
-void FinishScore(float pre_speed) {
-  if (g_cur_prof < 0) return;
-  if (pre_speed >= 3.0f && g_score_n > 0) {
-    const float score = std::clamp(g_score_sum / float(g_score_n) / pre_speed, 0.0f, 1.5f);
-    g_stats[g_cur_prof].n++;
-    g_stats[g_cur_prof].sum += score;
-    SaveStats();
-    char line[400];
-    int n = 0;
-    for (int i = 0; i < kProfileCount; ++i) {
-      n += std::snprintf(line + n, sizeof(line) - n, " %c=%.2f(%d)", 'A' + i,
-                         g_stats[i].n ? g_stats[i].sum / g_stats[i].n : 0.0f, g_stats[i].n);
-    }
-    REXLOG_INFO("portal-probe: GATE learn: {} kept {:.0f}% of {:.1f} m/s; mean kept per setup:{}",
-                kProfiles[g_cur_prof].name, score * 100.0f, pre_speed, line);
-  }
-  g_cur_prof = -1;
-  g_next_prof = SelectProfile();
-}
+// Crossings always use the setup that won the run 073-086 A/B learner (C, run 082: 96% kept, n=29; B board move
+// alone 88%, plain teleport 39%): the executor's board reset 82C05F50 (zeroes all 14 board rates) is replaced by
+// SetTransform 82C0B2C8 (keeps them), and the skeleton vectors the teleport zeroes are restored (turned).
+int g_cross_count = 0;
 
 // The actor's position bookkeeping around +1200..+1264 (ground positions, deltas). Captured before a crossing, logged
-// after, and optionally put back (deltas turned by the pair's matrix) so the game keeps seeing the old motion.
+// after (writing these fields back caused the flicker/respawn glitch, runs 077-079: never write them).
 constexpr uint32_t kActorFrom = 1184, kActorWords = 24;
 uint32_t g_actor_pre[kActorWords];
-bool g_actor_pre_valid = false, g_prof_surgery = false;
-int g_delta_frames = 0, g_actor_logged = 0;
+int g_actor_logged = 0;
 
 void CaptureActor(uint8_t* base, uint32_t self) {
-  g_actor_pre_valid = true;
-  for (uint32_t i = 0; i < kActorWords; ++i) g_actor_pre_valid &= ReadBe32(base, self + kActorFrom + 4 * i, &g_actor_pre[i]);
+  for (uint32_t i = 0; i < kActorWords; ++i) ReadBe32(base, self + kActorFrom + 4 * i, &g_actor_pre[i]);
 }
 
 void LogActor(uint8_t* base, uint32_t self, const char* when) {
@@ -921,34 +789,6 @@ void LogActor(uint8_t* base, uint32_t self, const char* when) {
                 std::bit_cast<float>(g_actor_pre[i + 2]), std::bit_cast<float>(g_actor_pre[i + 3]),
                 std::bit_cast<float>(w[0]), std::bit_cast<float>(w[1]), std::bit_cast<float>(w[2]),
                 std::bit_cast<float>(w[3]));
-  }
-}
-
-float g_move_target[3];  // the exit ground position (feet) of the crossing in progress
-int g_move_k = 0;
-
-// Everything the game uses to see motion, moved as one: ground positions to where the skater now is (advanced by
-// the per-frame delta on later frames), delta and velocity kept (turned). Without this the game sees a 15 m jump.
-void WriteActor(uint8_t* base, uint32_t self, int k) {
-  if (!g_actor_pre_valid) return;
-  float d[3], v[3];
-  const uint32_t di = (1232 - kActorFrom) / 4, vi = (1248 - kActorFrom) / 4;
-  const float d0[3] = {std::bit_cast<float>(g_actor_pre[di]), std::bit_cast<float>(g_actor_pre[di + 1]),
-                       std::bit_cast<float>(g_actor_pre[di + 2])};
-  const float v0[3] = {std::bit_cast<float>(g_actor_pre[vi]), std::bit_cast<float>(g_actor_pre[vi + 1]),
-                       std::bit_cast<float>(g_actor_pre[vi + 2])};
-  std::copy(d0, d0 + 3, d);
-  std::copy(v0, v0 + 3, v);
-  if (g_restore_turn) {
-    Turn(g_restore_m, d0, d);
-    Turn(g_restore_m, v0, v);
-  }
-  for (int c = 0; c < 3; ++c) {
-    const float pos = g_move_target[c] + d[c] * float(k);
-    WriteBeFloat(base, self + 1200 + 4 * c, pos);
-    WriteBeFloat(base, self + 1216 + 4 * c, pos);
-    WriteBeFloat(base, self + 1232 + 4 * c, d[c]);
-    WriteBeFloat(base, self + 1248 + 4 * c, v[c]);
   }
 }
 
@@ -996,14 +836,6 @@ bool GateStep(PPCContext& ctx, uint8_t* base, uint32_t self) {
       speed_now = std::hypot(p[0] - last[0], p[2] - last[2]) / dt;
     }
     last_t = t;
-    if (speed_log_left > 0) {
-      if (speed_log_left <= 33 && speed_log_left >= 18) {  // 15-30 frames after the crossing
-        g_score_sum += speed_now;
-        ++g_score_n;
-      } else if (speed_log_left == 17) {
-        FinishScore(pre_speed);
-      }
-    }
     if (speed_log_left > 0 && (speed_log_left-- % 4) == 0) {
       uint32_t st = 0;
       ReadBe32(base, self + 1336, &st);
@@ -1148,43 +980,13 @@ bool GateStep(PPCContext& ctx, uint8_t* base, uint32_t self) {
   have = true;
   const float speed_before = speed_now;
   skate3::portal_gate::Cross cross;
-  const bool ab = REXCVAR_GET(skate3_portal_gate_ab);
-  if (g_next_prof < 0) g_next_prof = SelectProfile();
-  const Profile& prof = kProfiles[ab ? g_next_prof : kDefaultProfile];
   skate3::portal_gate::SetWallClear(1.2f);
-  // A crossing from player state 100 keeps its speed; from 200 (board bouncing on rough ground) it does not. When
-  // the trigger fires in another state, hold the teleport a few frames for a riding frame (the skater keeps rolling).
-  static struct {
-    bool active = false;
-    int waited = 0;
-    skate3::portal_gate::Cross cross;
-  } hold;
-  uint32_t st_now = 0;
-  ReadBe32(base, self + 1336, &st_now);
-  if (hold.active) {
-    if (false) {
-      return false;
-    }
-    REXLOG_INFO("portal-probe: GATE held {} frames, crossing now in state {}", hold.waited, st_now);
-    cross = hold.cross;
-    hold.active = false;
-  } else if (!skate3::portal_gate::Step(p, allowed, flags, &cross)) {
-    return false;
-  } else if (false) {
-    hold.active = true;
-    hold.waited = 0;
-    hold.cross = cross;
-    return false;
-  }
+  if (!skate3::portal_gate::Step(p, allowed, flags, &cross)) return false;
   pre_speed = speed_before;
   ++g_cross_count;
-  g_cur_prof = ab ? g_next_prof : -1;
-  g_prof_restore = prof.restore;
-  g_prof_surgery = prof.surgery;
   CaptureActor(base, self);
-  g_score_sum = 0;
-  g_score_n = 0;
-  REXLOG_INFO("portal-probe: GATE profile {} (crossing #{})", prof.name, g_cross_count);
+  // Same text as when the A/B learner picked the setup, so older log scripts still split crossings on it.
+  REXLOG_INFO("portal-probe: GATE profile C: board move + restored skeleton (crossing #{})", g_cross_count);
   speed_log_left = 48;
   trace_left = 96;
   uint32_t state_at_cross = 0;
@@ -1196,35 +998,15 @@ bool GateStep(PPCContext& ctx, uint8_t* base, uint32_t self) {
   // jump itself read as a 30+ m/s speed.
   std::copy(cross.exit_pos, cross.exit_pos + 3, tracked);
   std::copy(cross.exit_pos, cross.exit_pos + 3, last);
-  // Velocity in: the board's own rate (block +0x140), else the tracked displacement. Out: the pair's matrix
-  // applied to it. Facing after the crossing = the horizontal direction of the velocity that leaves.
+  // Velocity in: the tracked (horizontal) displacement. Out: the pair's matrix applied to it. Facing after the
+  // crossing = the horizontal direction of the velocity that leaves. board/block are only read for the SCAN log.
   uint32_t board = 0, block = 0;
-  const bool have_block = ReadBe32(base, self + 1880, &board) && ReadBe32(base, board + 12, &block) &&
-                          block >= 0x10000 && block < 0xC0000000 && !(block & 3);
+  if (ReadBe32(base, self + 1880, &board)) ReadBe32(base, board + 12, &block);
   float vin[3] = {0, 0, 0}, vout[3];
-  // The board's fastest body (body 0 is not always the one carrying the speed).
-  bool board_rate = false;
-  if (have_block && false) {
-    float best = 1.0f;
-    for (int i = 0; i < 7; ++i) {
-      float v[3];
-      if (ReadVec(base, block + kLinRates + 16 * i, v)) {
-        const float m = std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
-        if (m > best) {
-          best = m;
-          std::copy(v, v + 3, vin);
-          board_rate = true;
-        }
-      }
-    }
-  }
   const float dlen = std::hypot(hx, hz);
   const float meas[2] = {dlen > 0.01f ? hx / dlen * speed_before : 0.0f, dlen > 0.01f ? hz / dlen * speed_before : 0.0f};
-  if (!board_rate) {
-    vin[0] = meas[0];
-    vin[1] = 0.0f;
-    vin[2] = meas[1];
-  }
+  vin[0] = meas[0];
+  vin[2] = meas[1];
   if (speed_before >= 3.0f && REXCVAR_GET(skate3_portal_probe)) {
     g_scan.clear();
     g_scan_frames = 0;
@@ -1265,23 +1047,14 @@ bool GateStep(PPCContext& ctx, uint8_t* base, uint32_t self) {
   REXLOG_INFO("portal-probe: GATE velocity in ({:.1f}, {:.1f}, {:.1f}) out ({:.1f}, {:.1f}, {:.1f}), matrix change {:.2f}",
               vin[0], vin[1], vin[2], vout[0], vout[1], vout[2], change);
   g_restore_turn = change > 0.05f && REXCVAR_GET(skate3_portal_gate_turn);
-  g_turn_in_place = g_restore_turn && !(prof.restore || REXCVAR_GET(skate3_portal_gate_restore));
   std::copy(cross.vel, cross.vel + 9, g_restore_m);
   // Exit height: a target at ground level makes the game put the skater off the board (state 500) and the
   // speed dies; a target ~1 m above the ground starts it airborne (state 200), which keeps the velocity (7 of 9
   // logged crossings, all ~1 m up, kept 7-9 m/s; both ground-level ones lost it).
-  const float kExitLift = prof.lift;
+  constexpr float kExitLift = 1.0f;
   const float target[16] = {hz, 0, -hx, 0, 0, 1, 0, 0, hx, 0, hz, 0,
                             cross.exit_pos[0], cross.exit_pos[1] - up_offset + kExitLift * cross.lift, cross.exit_pos[2], 1};
-  // The grounded teleport zeroes the skeleton's velocities and the airborne one keeps them; the only difference
-  // the executor can see is the actor's flags, so show it the airborne ones (the game rewrites them next frame).
-  uint32_t arm_flags = flags;
-  if (false && (flags & 0x40000000)) {
-    arm_flags &= ~0x40000000u;
-    REXLOG_INFO("portal-probe: GATE airmode: flags {:08X} -> {:08X} for the teleport", flags, arm_flags);
-  }
-  std::copy(target + 12, target + 15, g_move_target);
-  const bool ok = ArmTeleport(base, sp, self, arm_flags, target);
+  const bool ok = ArmTeleport(base, sp, self, flags, target);
   REXLOG_INFO("portal-probe: GATE teleport {}: feet target ({:.2f}, {:.2f}, {:.2f}) heading ({:.2f}, {:.2f})",
               ok ? "armed" : "REFUSED", target[12], target[13], target[14], hx, hz);
   have = false;  // after the jump the old position is meaningless; wait for a riding frame
@@ -1573,15 +1346,15 @@ extern "C" REX_FUNC(sub_82DB88C8) {
   const bool hop_armed = ArmRelocation(base, ctx.r1.u32, self);
   const bool gate_armed = !hop_armed && skate3::portal_gate::Enabled() && self == g_human &&
                           GateStep(ctx, base, self);
-  // the speed-restore machinery runs for hop tests, and for gate crossings when asked
-  const bool armed = hop_armed || (gate_armed && (g_prof_restore || REXCVAR_GET(skate3_portal_gate_restore)));
+  // the speed-restore machinery runs for hop tests and for every gate crossing
+  const bool armed = hop_armed || gate_armed;
   t_restore_rates = armed;
   // Off the board (state 500) the board is detached from the skater: keeping its rates exploded next frame (run 122:
   // (-592, -203) m/s, then repeated recovery warps), so those crossings take the plain reset.
   uint32_t player_state = 0;
   ReadBe32(base, self + 1336, &player_state);
-  t_surgery = gate_armed && g_prof_surgery && player_state != 500;
-  if (gate_armed && g_prof_surgery && player_state == 500) {
+  t_surgery = gate_armed && player_state != 500;
+  if (gate_armed && player_state == 500) {
     REXLOG_INFO("portal-probe: GATE crossing while off the board (state 500): plain board reset, rates not kept");
   }
   t_human_call = self == g_human;
@@ -1659,10 +1432,6 @@ extern "C" REX_FUNC(sub_82DB88C8) {
     } else {
       REXLOG_INFO("portal-probe: MOVE failed: board chain unreadable");
     }
-  }
-  if (gate_armed && g_turn_in_place) {
-    g_turn_in_place = false;
-    TurnLive(base, self);
   }
   if (self == g_human && !g_scan.empty()) {
     if (g_scan_frames == 0) ScanLog(base, "post-teleport");
@@ -2159,13 +1928,6 @@ struct HeldBody {
   float off[3];  // from the group's centre
 };
 std::vector<HeldBody> g_held_bodies;
-
-
-
-bool BodiesHolding() {
-  std::lock_guard<std::mutex> lock(g_body_mutex);
-  return !g_held_bodies.empty();
-}
 
 // Put the test prop (and its connected group) at the scenario's start spot and let it go.
 bool TestSetup(uint8_t* base, int64_t now) {
