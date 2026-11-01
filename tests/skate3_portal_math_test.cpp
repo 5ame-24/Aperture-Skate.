@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <algorithm>
 
 #include "skate3_portal_math.h"
 
@@ -206,6 +207,95 @@ int main() {
     const float none[2] = {0, 0};
     ExitTarget(slow, none, pos, t);
     CHECK(Near(t[10], 1));
+  }
+  // ---- camera poses ----
+  // View <-> pose round trip, for a left-handed basis too (the game's camera may be either).
+  {
+    for (float hand : {1.0f, -1.0f}) {
+      Pose p;
+      const float s = std::sqrt(0.5f);
+      const float pos[3] = {3, 4, -5}, f[3] = {s, 0, s}, u[3] = {0, 1, 0};
+      std::copy(pos, pos + 3, p.pos);
+      std::copy(f, f + 3, p.fwd);
+      std::copy(u, u + 3, p.up);
+      p.right[0] = hand * (u[1] * f[2] - u[2] * f[1]);
+      p.right[1] = hand * (u[2] * f[0] - u[0] * f[2]);
+      p.right[2] = hand * (u[0] * f[1] - u[1] * f[0]);
+      float view[16];
+      ViewFromPose(p, view);
+      // the camera position maps to the view origin
+      float o[3];
+      for (int k = 0; k < 3; ++k) o[k] = p.pos[0] * view[k] + p.pos[1] * view[4 + k] + p.pos[2] * view[8 + k] + view[12 + k];
+      CHECK(Near(o[0], 0) && Near(o[1], 0) && Near(o[2], 0));
+      Pose q;
+      PoseFromView(view, &q);
+      for (int k = 0; k < 3; ++k) {
+        CHECK(Near(q.pos[k], p.pos[k]) && Near(q.fwd[k], p.fwd[k]) && Near(q.up[k], p.up[k]) && Near(q.right[k], p.right[k]));
+      }
+      // blending keeps the handedness and the endpoints
+      Pose b = p;
+      b.pos[0] += 10;
+      const float yaw = 1.2f;
+      const float bf[3] = {std::sin(yaw), 0, std::cos(yaw)};
+      std::copy(bf, bf + 3, b.fwd);
+      b.right[0] = hand * (b.up[1] * bf[2] - b.up[2] * bf[1]);
+      b.right[1] = hand * (b.up[2] * bf[0] - b.up[0] * bf[2]);
+      b.right[2] = hand * (b.up[0] * bf[1] - b.up[1] * bf[0]);
+      Pose m;
+      BlendPose(p, b, 0.0f, &m);
+      for (int k = 0; k < 3; ++k) CHECK(Near(m.pos[k], p.pos[k]) && Near(m.fwd[k], p.fwd[k]) && Near(m.right[k], p.right[k]));
+      BlendPose(p, b, 1.0f, &m);
+      for (int k = 0; k < 3; ++k) CHECK(Near(m.pos[k], b.pos[k]) && Near(m.fwd[k], b.fwd[k]) && Near(m.right[k], b.right[k]));
+      BlendPose(p, b, 0.4f, &m);
+      CHECK(Near(Len(m.fwd), 1) && Near(Len(m.up), 1) && Near(Len(m.right), 1));
+      CHECK(Near(Dot(m.fwd, m.up), 0) && Near(Dot(m.fwd, m.right), 0) && Near(Dot(m.up, m.right), 0));
+      float c[3] = {m.up[1] * m.fwd[2] - m.up[2] * m.fwd[1], m.up[2] * m.fwd[0] - m.up[0] * m.fwd[2], m.up[0] * m.fwd[1] - m.up[1] * m.fwd[0]};
+      CHECK(Near(Dot(c, m.right), hand));
+      CHECK(Near(m.pos[0], 3 + 4));
+      // opposite forwards do not produce NaNs
+      Pose back = p;
+      for (int k = 0; k < 3; ++k) {
+        back.fwd[k] = -p.fwd[k];
+        back.right[k] = -p.right[k];
+      }
+      BlendPose(p, back, 0.5f, &m);
+      CHECK(std::isfinite(m.fwd[0] + m.up[0] + m.right[0]) && Near(Len(m.fwd), 1));
+    }
+  }
+  // Carrying a chase-camera pose through facing walls: the camera that was 4 m behind (+z) a skater going -z into blue comes out 4 m
+  // behind (+z) the skater leaving orange (still going -z) and still looks -z.
+  {
+    const Frame g[2] = {Wall(0, 2, 0, 0, 1), Wall(0, 2, 20, 0, -1)};
+    float R[9];
+    PairRotation(g[0], g[1], R);
+    Pose rel;
+    const float rp[3] = {0, 1.5f, 4}, f[3] = {0, 0, -1}, u[3] = {0, 1, 0}, r[3] = {-1, 0, 0};
+    std::copy(rp, rp + 3, rel.pos);
+    std::copy(f, f + 3, rel.fwd);
+    std::copy(u, u + 3, rel.up);
+    std::copy(r, r + 3, rel.right);
+    const float sk[3] = {0, 1, 18};
+    Pose out;
+    CarryPose(rel, R, sk, &out);
+    CHECK(Near(out.pos[0], 0) && Near(out.pos[1], 2.5f) && Near(out.pos[2], 22));
+    CHECK(Near(out.fwd[2], -1) && Near(out.up[1], 1));
+    // Same-wall pair (180 degrees): camera ends up on the other side, looking the other way.
+    const Frame h[2] = {Wall(0, 2, 0, 0, 1), Wall(10, 2, 0, 0, 1)};
+    PairRotation(h[0], h[1], R);
+    CarryPose(rel, R, sk, &out);
+    CHECK(Near(out.pos[2], 18 - 4) && Near(out.fwd[2], 1) && Near(out.up[1], 1));
+    // First person: yaw facing -z (pi) through the same-wall pair faces +z (0).
+    double yaw = 3.14159265358979, pitch = -0.1;
+    TurnYawPitch(R, &yaw, &pitch);
+    CHECK(Near(float(yaw), 0, 1e-3f) && Near(float(pitch), -0.1f, 1e-4f));
+  }
+  CHECK(Near(Smoothstep(0), 0) && Near(Smoothstep(1), 1) && Near(Smoothstep(0.5f), 0.5f) && Near(Smoothstep(2), 1));
+  {
+    const float a[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 5, 6, 7, 1};
+    const float b[16] = {2, 0, 0, 0, 0, 3, 0, 0, 0, 0, 4, 0, 0, 0, 0, 1};
+    float o[16];
+    Mul4(a, b, o);
+    CHECK(Near(o[0], 2) && Near(o[5], 3) && Near(o[10], 4) && Near(o[12], 10) && Near(o[13], 18) && Near(o[14], 28) && Near(o[15], 1));
   }
   std::puts("skate3_portal_math_test: ok");
   return 0;

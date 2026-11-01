@@ -97,4 +97,109 @@ void ExitTarget(const float vout[3], const float fallback_dir[2], const float po
   std::copy(t, t + 16, target);
 }
 
+void PoseFromView(const float view[16], Pose* out) {
+  for (int i = 0; i < 3; ++i) {
+    out->right[i] = view[i * 4 + 0];
+    out->up[i] = view[i * 4 + 1];
+    out->fwd[i] = view[i * 4 + 2];
+  }
+  for (int j = 0; j < 3; ++j) out->pos[j] = -(view[12] * view[j * 4 + 0] + view[13] * view[j * 4 + 1] + view[14] * view[j * 4 + 2]);
+}
+
+void ViewFromPose(const Pose& p, float view[16]) {
+  std::fill(view, view + 16, 0.0f);
+  for (int i = 0; i < 3; ++i) {
+    view[i * 4 + 0] = p.right[i];
+    view[i * 4 + 1] = p.up[i];
+    view[i * 4 + 2] = p.fwd[i];
+  }
+  for (int k = 0; k < 3; ++k) view[12 + k] = -(p.pos[0] * view[k] + p.pos[1] * view[4 + k] + p.pos[2] * view[8 + k]);
+  view[15] = 1.0f;
+}
+
+void Mul4(const float a[16], const float b[16], float out[16]) {
+  float t[16];
+  for (int r = 0; r < 4; ++r) {
+    for (int c = 0; c < 4; ++c) {
+      float sum = 0.0f;
+      for (int k = 0; k < 4; ++k) sum += a[r * 4 + k] * b[k * 4 + c];
+      t[r * 4 + c] = sum;
+    }
+  }
+  std::copy(t, t + 16, out);
+}
+
+void CarryPose(const Pose& rel, const float R[9], const float skater[3], Pose* out) {
+  float o[3];
+  Apply(R, rel.pos, o);
+  for (int k = 0; k < 3; ++k) out->pos[k] = skater[k] + o[k];
+  Apply(R, rel.right, out->right);
+  Apply(R, rel.up, out->up);
+  Apply(R, rel.fwd, out->fwd);
+}
+
+static void Cross3(const float a[3], const float b[3], float out[3]) {
+  out[0] = a[1] * b[2] - a[2] * b[1];
+  out[1] = a[2] * b[0] - a[0] * b[2];
+  out[2] = a[0] * b[1] - a[1] * b[0];
+}
+
+static bool Normalise(float v[3]) {
+  const float l = std::sqrt(Dot(v, v));
+  if (!(l > 1e-4f)) return false;
+  for (int k = 0; k < 3; ++k) v[k] /= l;
+  return true;
+}
+
+void BlendPose(const Pose& a, const Pose& b, float w, Pose* out) {
+  w = std::clamp(w, 0.0f, 1.0f);
+  float ua_x_fa[3];
+  Cross3(a.up, a.fwd, ua_x_fa);
+  const float hand = Dot(ua_x_fa, a.right) >= 0.0f ? 1.0f : -1.0f;
+  Pose r;
+  float f[3], u[3];
+  for (int k = 0; k < 3; ++k) {
+    r.pos[k] = a.pos[k] + (b.pos[k] - a.pos[k]) * w;
+    f[k] = a.fwd[k] + (b.fwd[k] - a.fwd[k]) * w;
+    u[k] = a.up[k] + (b.up[k] - a.up[k]) * w;
+  }
+  if (!Normalise(f)) std::copy(b.fwd, b.fwd + 3, f);  // opposite forwards: no halfway, take the target
+  float d = Dot(u, f);
+  for (int k = 0; k < 3; ++k) u[k] -= d * f[k];
+  if (!Normalise(u)) {
+    const float wy[3] = {0, 1, 0};
+    std::copy(wy, wy + 3, u);
+    d = Dot(u, f);
+    for (int k = 0; k < 3; ++k) u[k] -= d * f[k];
+    if (!Normalise(u)) {
+      const float wx[3] = {1, 0, 0};
+      std::copy(wx, wx + 3, u);
+      d = Dot(u, f);
+      for (int k = 0; k < 3; ++k) u[k] -= d * f[k];
+      Normalise(u);
+    }
+  }
+  float rt[3];
+  Cross3(u, f, rt);
+  for (int k = 0; k < 3; ++k) {
+    r.right[k] = hand * rt[k];
+    r.up[k] = u[k];
+    r.fwd[k] = f[k];
+  }
+  *out = r;
+}
+
+float Smoothstep(float t) {
+  t = std::clamp(t, 0.0f, 1.0f);
+  return t * t * (3.0f - 2.0f * t);
+}
+
+void TurnYawPitch(const float R[9], double* yaw, double* pitch) {
+  const float f[3] = {float(std::sin(*yaw) * std::cos(*pitch)), float(std::sin(*pitch)), float(std::cos(*yaw) * std::cos(*pitch))};
+  float o[3];
+  Apply(R, f, o);
+  *yaw = std::atan2(double(o[0]), double(o[2]));
+  *pitch = std::asin(std::clamp(double(o[1]), -1.0, 1.0));
+}
+
 }  // namespace skate3::portal_math

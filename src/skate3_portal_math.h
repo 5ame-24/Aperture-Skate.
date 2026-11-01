@@ -58,4 +58,23 @@ bool TestCrossing(const Frame g[2], const float prev[3], const float now[3], boo
 // facing the horizontal direction of `vout` (or `fallback_dir` when that is slower than 0.5 m/s), translation `pos`.
 void ExitTarget(const float vout[3], const float fallback_dir[2], const float pos[3], float target[16]);
 
+// ---- Camera poses (portal camera carry) ----
+// A camera pose: world position and its axes. Row-vector view matrices (p_view = p_world * V, as the game and the native renderer
+// use) keep right/up/forward in columns 0/1/2 of the upper 3x3 and -pos . axis in row 3.
+struct Pose {
+  float pos[3] = {};
+  float right[3] = {1, 0, 0}, up[3] = {0, 1, 0}, fwd[3] = {0, 0, 1};
+};
+void PoseFromView(const float view[16], Pose* out);
+void ViewFromPose(const Pose& p, float view[16]);
+// row-vector 4x4 product a * b
+void Mul4(const float a[16], const float b[16], float out[16]);
+// Pose `rel` (position relative to the skater) carried through a portal: position S + R rel.pos, axes R axes.
+void CarryPose(const Pose& rel, const float R[9], const float skater[3], Pose* out);
+// From a to b, w in [0, 1]: position lerped, forward and up lerped and re-orthonormalised, right rebuilt with a's handedness.
+void BlendPose(const Pose& a, const Pose& b, float w, Pose* out);
+float Smoothstep(float t);
+// Yaw/pitch (forward = (sin yaw cos pitch, sin pitch, cos yaw cos pitch)) turned by R.
+void TurnYawPitch(const float R[9], double* yaw, double* pitch);
+
 }  // namespace skate3::portal_math
