@@ -3,7 +3,9 @@
 /build/
 /generated/
 /generated.backup-*/
-/tools/
+/tools/*
+!/tools/re/
+__pycache__/
 
 # Local game dump and retail media. Users must provide their own copy.
 /game/
