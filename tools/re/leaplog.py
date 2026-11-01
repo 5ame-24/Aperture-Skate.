@@ -11,10 +11,16 @@ root = os.path.join(os.path.dirname(__file__), "..", "..", "out", "build", "maco
 path = sys.argv[1] if len(sys.argv) > 1 else max(glob.glob(os.path.join(root, "skate3_*.log")), key=os.path.getmtime)
 print(path)
 seen, crossings, swaps, noswap, follows = set(), [], 0, 0, collections.defaultdict(list)
+linked, notsent = set(), 0
+other = collections.Counter()
 pcam = collections.Counter()
 carries = []
 for line in open(path, errors="replace"):
     if "NPCX" in line:
+        if "NPCX actor" in line and "linked to skater entity" in line:
+            linked.add(re.search(r"NPCX actor (\w+)", line).group(1))
+        if "not sent" in line:
+            notsent += 1
         m = re.search(r"NPCX actor (\w+) seen", line)
         if m:
             seen.add(m.group(1))
@@ -28,9 +34,12 @@ for line in open(path, errors="replace"):
         m = re.search(r"NPCX actor (\w+) after crossing t\+(\d+).*?([\d.]+) m from the exit, speed ([\d.]+) m/s \(in ([\d.]+)\)", line)
         if m:
             follows[m.group(1)].append((int(m.group(2)), float(m.group(3)), float(m.group(4)), float(m.group(5))))
+    for tag in ("FLING armed", "FLING not armed", "topped up", "FLING +", "EXITFIX", "portal-props: CHAR", "HOLE kept solid", "sinking through the opening", "CHARS "):
+        if tag in line:
+            other[tag] += 1
     if "PCAM" in line:
         for key in ("carry started", "carry done", "carry cancelled", "holding the carried pose", "no camera pose recorded",
-                    "never showed up", "first person turned"):
+                    "never showed up", "first person turned", "carry superseded"):
             if key in line:
                 pcam[key] += 1
         m = re.search(r"carry done .*after (\d+) ms, (\d+) frames, waited (-?\d+) ms.*shown camera ([\d.]+) m, game camera ([\d.]+) m", line)
@@ -44,6 +53,8 @@ for actor, rows in follows.items():
     last = rows[-1]
     print(f"  {actor}: t+{last[0]} {last[1]:.1f} m from the exit, speed {last[2]:.1f} (in {last[3]:.1f})"
           f"{'  <- drifted back?' if last[1] > 6 else ''}")
-print("PCAM:", dict(pcam) if pcam else "no lines")
+print(f"NPCX: {len(linked)} actors linked to an entity, {notsent} 'reached a portal but was not sent'")
+print("PCAM:", {k: v for k, v in pcam.items() if v} or "no lines")
+print("other:", dict(other) if other else "no lines")
 for c in carries:
     print(f"  carry {c[0]:.0f} ms / {c[1]:.0f} frames, waited {c[2]:.0f} ms, max move shown {c[3]:.2f} m vs game {c[4]:.2f} m")

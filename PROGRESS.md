@@ -553,4 +553,34 @@ Actor offsets: +1200/+1216 ground pos, +1232 delta, +1248 velocity, +1296 flags,
     Checked CLAUDE.md/PROGRESS.md for pasted code: none; the closest is item 39 (wake steps), which is pseudocode-level prose.
     New tool: `tools/re/leaplog.py [log]` summarises NPCX and PCAM lines. Note: crossings.py keys on `GATE crossing with flags`, not the
     kept `GATE profile C` line, so that line can go (local task).
+55. Runs 180/181 feedback -> fixes (built, untested). Goal: seamless crossings for the player, NPCs and momentum.
+    - NPC positions (run 180: 10 NPCX "seen", all at (0.00, 0.85, 0.00), 0 crossings): NpcStep read the actor's ground position
+      (+1216..+1224, the PlayerInputState field the human's tracking uses) and added 0.85 m. For NPC actors that field is all zeros, so every
+      NPC sat at the origin, never moved and never crossed. "actors so far" fell because actors not updated for 10 s were pruned after the
+      count was printed. Fix: each NPC actor is LINKED to its presentation entity (live skater-family entity from the entity store,
+      `native_entity::CharacterEntities`, world matrix at entity+416, the same source as the human's airborne tracking): first a pointer
+      scan (a word in actor 0..0x1000 / board 0..0x200 / skeleton 0..0x1000 equal to an entity address; the first offset that works is
+      tried first on every other actor), else a position scan (a float triple within 0.25 m of an entity position in actor 0x2000 / board
+      0x200 / skeleton 0x4100, linked when two scans in a row pick the same entity). Position and velocity then come from the entity, so
+      airborne NPCs can cross too. Logs: `NPCX ... linked to skater entity E (pointer at R+0xN | position copy ...)`, `NPCX pointer link
+      learned`, `NPCX ... no pointer to and no copy of any ... after 3 scans`, `NPCX ... dropped`, `NPCX ... reached a portal but was not sent`.
+    - NPCs vanishing and falling (human note): not NPCX (0 crossings) but the PROP code: NPC skeleton bodies near a portal were published as
+      props (hole opened under them) and moved as a 25-33-body group without their actor. Now characters (every skater-family entity but the
+      human's, and LivingWorld people) are published to the gate each human frame (`PublishCharacters`, `SetCharacterPositions`); bodies within
+      1.3 m of one get no hole (`HOLE kept solid under another character`), are not published as props, not rescued, and their cluster is
+      not crossed (`portal-props: CHAR ... left alone`). Old behaviour: `--skate3_portal_props_characters=true`. `CHARS N character
+      entities (...)` every 10 s.
+    - Floor fall-through (run 181): (a) with the hole a floor exit came out at centre = plane + depth + 0.02 and the feet target subtracted the
+      0.85 m centre height, so the feet started up to 0.83 m inside the floor; now feet >= floor plane + 0.05, and a ceiling exit keeps the
+      head under the ceiling (`EXITFIX floor|ceiling exit: feet a -> b`). (b) a crossing refused for one frame (mid-relocation) left the
+      skater sinking through the open hole for the 60-frame standing block; a skater below a flat portal's plane and still moving into it now
+      crosses regardless of the block (`portal-gate: crossed ... (sinking through the opening)`).
+    - Momentum fling (cvar `skate3_portal_fling`, default OFF; `skate3_portal_fling_frames` 10): the crossing now measures the 3D velocity
+      of the tracked point (vertical included; the old `vin` was horizontal only) and arms v_out = R v_in. For the next N human updates
+      `FlingFrame` compares the mean of the board's 7 linear rates along the exit direction with v_out + g t (g 9.81, an assumption) and
+      tops it up when below 90% (rates and actor +1248, along the exit direction only). Logs: `FLING armed: v_in -> v_out`, `FLING +k ok |
+      topped up a -> b`, `FLING +k stopped (bailed | ...)`, `FLING window over after N frames, M top-ups`.
+    - Camera carry (run 181: 59 started, 27 done, 0 cancelled): a crossing during an active carry replaced it without a log, and the pose ring
+      was not fed while carrying (the 8 "no pose recorded"). Now `PCAM carry superseded (crossing a -> b)` and the ring is fed with the shown
+      pose, so the next carry chains from what was on screen; turning the portals off mid-carry logs `carry cancelled`.
 

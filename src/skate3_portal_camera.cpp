@@ -82,7 +82,13 @@ float TurnDegrees(const float R[9]) {
 
 bool Apply(const float cam_view[16], const float proj[16], bool camera_owned, float view_proj[16], float cam_pos[3]) {
   float skater[3];
-  if (!skate3::portal_gate::Enabled() || !skate3::portal_gate::TrackedPos(skater)) return false;
+  if (!skate3::portal_gate::Enabled() || !skate3::portal_gate::TrackedPos(skater)) {
+    if (g_carry.active) {
+      g_carry.active = false;
+      REXLOG_INFO("portal-camera: PCAM carry cancelled (portals off or no tracked skater)");
+    }
+    return false;
+  }
   const int64_t now = NowNs();
   pm::Pose game;
   pm::PoseFromView(cam_view, &game);
@@ -96,6 +102,13 @@ bool Apply(const float cam_view[16], const float proj[16], bool camera_owned, fl
   const bool on = REXCVAR_GET(skate3_portal_camcarry) && !camera_owned && !skate3::portal_gate::FpvActive();
   if (seq != g_seen_seq) {
     g_seen_seq = seq;
+    // Run 181: 59 carries started, 27 done, 0 cancelled: in a portal loop the next crossing came before the ease finished and silently
+    // replaced the carry. Say so; the new carry starts from the pose that was on screen (the ring is fed with the shown pose while carrying).
+    if (g_carry.active) {
+      REXLOG_INFO("portal-camera: PCAM carry superseded (crossing {} -> {}) after {:.0f} ms, {} frames: chained from the shown camera",
+                  g_carry.seq, seq, (now - g_carry.start_ns) / 1e6, g_carry.frames);
+      g_carry.active = false;
+    }
     const Rel* pre = Before(cross_ns);
     if (on && pre) {
       g_carry = Carry{};
@@ -132,6 +145,7 @@ bool Apply(const float cam_view[16], const float proj[16], bool camera_owned, fl
   // The game thread may not have moved the skater yet (render frames run ahead): while the tracked position is still nearer the entry,
   // the game camera is still consistent with it, so show that.
   if (Dist(skater, c.entry) < Dist(skater, c.exit)) {
+    Push(now, rel_now);
     if (now - c.start_ns > 500'000'000) {
       c.active = false;
       REXLOG_INFO("portal-camera: PCAM the skater never showed up at the exit within 0.5 s: carry dropped");
@@ -161,6 +175,11 @@ bool Apply(const float cam_view[16], const float proj[16], bool camera_owned, fl
   if (c.have_last) c.max_jump = std::max(c.max_jump, Dist(shown.pos, c.last_pos));
   std::copy(shown.pos, shown.pos + 3, c.last_pos);
   c.have_last = true;
+  {
+    pm::Pose shown_rel = shown;
+    for (int k = 0; k < 3; ++k) shown_rel.pos[k] -= skater[k];
+    Push(now, shown_rel);
+  }
   float view[16];
   pm::ViewFromPose(shown, view);
   pm::Mul4(view, proj, view_proj);
