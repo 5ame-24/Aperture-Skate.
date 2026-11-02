@@ -85,4 +85,30 @@ bool FitQuadratic(const float* t, const float* y, int n, float* a, float* b, flo
 // Root mean square of |a_i - b_i| over n 3D samples.
 float RmsDiff(const float (*a)[3], const float (*b)[3], int n);
 
+// ---- Portal-style behaviours from public descriptions (docs/specs/001-portal-public-behaviour.md) ----
+// Floor-portal funnelling: a body falling toward a floor portal is steered so it lands on the portal's centre instead of its rim.
+struct FunnelRules {
+  float height = 3.25f;       // funnel when this far (or less) above the portal plane (Portal: 128 units)
+  float well_above = 6.5f;    // ... or up to this high when the predicted landing is already close (Portal: 256 units)
+  float capture = 1.5f;       // the predicted landing must be inside the oval scaled by this
+  float snap = 0.25f;         // no correction when the predicted landing is this close to the centre (Portal: 10 units)
+  float gimme_dot = 0.7f;     // velocity direction . direction to the portal centre must be at least this
+  float max_accel = 12.0f;    // m/s^2 of in-plane velocity change allowed
+  float min_fall = 0.5f;      // m/s: must be moving into the plane at least this fast
+};
+// Returns true with dv (world, m/s, to add to the velocity this step) when portal `f` (a floor: n.y > kFlatNy) funnels the body at p with
+// velocity v under `gravity` (m/s^2, downwards); landing_offset = distance of the predicted landing from the centre before correction.
+bool FunnelCorrection(const Frame& f, const float p[3], const float v[3], float gravity, float dt, const FunnelRules& rules, float dv[3],
+                      float* landing_offset);
+
+// Camera righting after a tilted exit: the roll about the view's forward axis eases back to upright (up toward world up) with a
+// rate-limited, accelerating angular speed. Interpretation of Portal's cl_portal_camera_orientation_* defaults (rate 480, base 45,
+// max_speed 375 deg/s, acceleration 1000 deg/s^2): target speed = min(max_speed, base + rate * roll / 180 deg).
+struct RightRules {
+  float rate = 480.0f, base = 45.0f, max_speed = 375.0f, accel = 1000.0f;  // degrees
+};
+// Turns `p` about its forward axis by this step's amount; `omega` (deg/s) is the controller state. Returns the remaining roll in degrees
+// (0 when upright or when forward is too close to vertical for "upright" to mean anything).
+float RightRoll(Pose* p, float* omega, float dt, const RightRules& rules);
+
 }  // namespace skate3::portal_math

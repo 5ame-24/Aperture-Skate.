@@ -321,6 +321,77 @@ int main() {
     const float va[2][3] = {{1, 2, 3}, {0, 0, 0}}, vb[2][3] = {{1, 2, 7}, {0, 3, 0}};
     CHECK(Near(RmsDiff(va, vb, 2), std::sqrt((16.0f + 9.0f) / 2)));
   }
+  // ---- funnelling ----
+  {
+    const Frame fl = Floor(0, 0, 0, 0, 1, 2.2f);
+    const FunnelRules fr;
+    float dv[3], off;
+    // Falling from 3 m, 1.8 m off-centre across, drifting slightly away: steered toward the centre (dv points back to x = 0).
+    const float p[3] = {1.8f, 3.0f, 0.0f}, v[3] = {-0.2f, -4.0f, 0.0f};
+    CHECK(FunnelCorrection(fl, p, v, 9.81f, 1.0f / 60, fr, dv, &off));
+    CHECK(dv[0] < 0 && Near(dv[1], 0) && Near(dv[2], 0));
+    CHECK(std::hypot(dv[0], dv[2]) <= fr.max_accel / 60 + 1e-4f);
+    // Iterating the correction (a simple ballistic simulation) lands within the snap distance of the centre.
+    float q[3] = {1.8f, 3.0f, 0.0f}, w[3] = {-0.2f, -4.0f, 0.0f};
+    for (int i = 0; i < 600 && q[1] > 0; ++i) {
+      const float dt = 1.0f / 60;
+      if (FunnelCorrection(fl, q, w, 9.81f, dt, fr, dv, &off)) {
+        for (int k = 0; k < 3; ++k) w[k] += dv[k];
+      }
+      w[1] -= 9.81f * dt;
+      for (int k = 0; k < 3; ++k) q[k] += w[k] * dt;
+    }
+    CHECK(std::hypot(q[0], q[2]) < 0.6f);  // without funnelling it would land at ~1.6 m
+    // Not when rising, too high, landing far outside, already centred, or on a wall portal.
+    const float up[3] = {0, 3, 0};
+    CHECK(!FunnelCorrection(fl, p, up, 9.81f, 1.0f / 60, fr, dv, &off));
+    const float high[3] = {1.8f, 9.0f, 0.0f};
+    CHECK(!FunnelCorrection(fl, high, v, 9.81f, 1.0f / 60, fr, dv, &off));
+    const float far[3] = {9.0f, 2.0f, 0.0f};
+    CHECK(!FunnelCorrection(fl, far, v, 9.81f, 1.0f / 60, fr, dv, &off));
+    const float centred[3] = {0.05f, 2.0f, 0.0f}, straight[3] = {0, -5, 0};
+    CHECK(!FunnelCorrection(fl, centred, straight, 9.81f, 1.0f / 60, fr, dv, &off));
+    CHECK(!FunnelCorrection(Wall(0, 2, 0, 0, 1), p, v, 9.81f, 1.0f / 60, fr, dv, &off));
+    // Moving away from the portal (gimme dot): no help.
+    const float away[3] = {6.0f, -1.0f, 0.0f};
+    CHECK(!FunnelCorrection(fl, p, away, 9.81f, 1.0f / 60, fr, dv, &off));
+  }
+  // ---- camera righting ----
+  {
+    const RightRules rr;
+    // A camera rolled 90 degrees (up = world x) looking along +z rights itself to up = world y, forward unchanged.
+    Pose p;
+    const float f[3] = {0, 0, 1}, u[3] = {1, 0, 0}, r[3] = {0, -1, 0};  // right = up x fwd for this layout
+    std::copy(f, f + 3, p.fwd);
+    std::copy(u, u + 3, p.up);
+    std::copy(r, r + 3, p.right);
+    float omega = 0, left = 90;
+    int steps = 0;
+    while (left > 0.05f && steps < 600) {
+      left = RightRoll(&p, &omega, 1.0f / 60, rr);
+      ++steps;
+    }
+    CHECK(left <= 0.05f);
+    CHECK(Near(p.up[1], 1.0f, 1e-3f) && Near(p.fwd[2], 1.0f, 1e-5f));
+    CHECK(Near(Dot(p.up, p.right), 0, 1e-4f) && Near(Len(p.up), 1, 1e-4f));
+    // 90 degrees takes a noticeable but short time (accelerating, capped): between 0.25 and 1 s at these rates.
+    CHECK(steps > 15 && steps < 60);
+    // the other roll direction converges too
+    const float u2[3] = {-1, 0, 0}, r2[3] = {0, 1, 0};
+    std::copy(u2, u2 + 3, p.up);
+    std::copy(r2, r2 + 3, p.right);
+    omega = 0;
+    for (int i = 0; i < 120; ++i) RightRoll(&p, &omega, 1.0f / 60, rr);
+    CHECK(Near(p.up[1], 1.0f, 1e-3f));
+    // upright stays put; straight down is left alone
+    Pose q;
+    CHECK(Near(RightRoll(&q, &omega, 1.0f / 60, rr), 0));
+    const float down[3] = {0, -1, 0}, qu[3] = {0, 0, 1}, qr[3] = {1, 0, 0};
+    std::copy(down, down + 3, q.fwd);
+    std::copy(qu, qu + 3, q.up);
+    std::copy(qr, qr + 3, q.right);
+    CHECK(Near(RightRoll(&q, &omega, 1.0f / 60, rr), 0) && Near(q.up[2], 1));
+  }
   std::puts("skate3_portal_math_test: ok");
   return 0;
 }

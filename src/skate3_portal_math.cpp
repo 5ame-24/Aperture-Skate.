@@ -285,4 +285,81 @@ float RmsDiff(const float (*a)[3], const float (*b)[3], int n) {
   return float(std::sqrt(sum / n));
 }
 
+bool FunnelCorrection(const Frame& f, const float p[3], const float v[3], float gravity, float dt, const FunnelRules& rules, float dv[3],
+                      float* landing_offset) {
+  dv[0] = dv[1] = dv[2] = 0.0f;
+  *landing_offset = 0.0f;
+  if (f.n[1] <= kFlatNy || !(dt > 0.0f) || !(gravity > 0.0f)) return false;
+  float lat, vert, h;
+  Local(f, p, &lat, &vert, &h);
+  const float vn = Dot(v, f.n);
+  if (h <= 0.0f || h > rules.well_above || vn > -rules.min_fall) return false;
+  // gravity is world -y; its parts along the normal and in the plane
+  const float gvec[3] = {0.0f, -gravity, 0.0f};
+  const float gn = -Dot(gvec, f.n);  // > 0: pulls into the plane
+  const float g_lat = Dot(gvec, f.r), g_vert = Dot(gvec, f.u);
+  // time to reach the plane: h + vn t - gn t^2 / 2 = 0
+  const float disc = vn * vn + 2.0f * gn * h;
+  if (disc < 0.0f) return false;
+  const float t = gn > 1e-4f ? (vn + std::sqrt(disc)) / gn : (vn < -1e-4f ? -h / vn : -1.0f);
+  if (!(t > 0.0f)) return false;
+  const float vlat = Dot(v, f.r), vvert = Dot(v, f.u);
+  const float land_lat = lat + vlat * t + 0.5f * g_lat * t * t, land_vert = vert + vvert * t + 0.5f * g_vert * t * t;
+  *landing_offset = std::hypot(land_lat, land_vert);
+  if (!InOval(land_lat / rules.capture, land_vert / rules.capture, 0.0f)) return false;
+  if (h > rules.height && !InOval(land_lat, land_vert, 0.0f)) return false;  // well above: only when already heading into the opening
+  if (*landing_offset < rules.snap) return false;
+  // moving toward the portal at all?
+  const float to_c[3] = {f.c[0] - p[0], f.c[1] - p[1], f.c[2] - p[2]};
+  const float lt = std::sqrt(Dot(to_c, to_c)), lv = std::sqrt(Dot(v, v));
+  if (lt < 1e-3f || lv < 1e-3f || Dot(to_c, v) / (lt * lv) < rules.gimme_dot) return false;
+  // in-plane velocity that lands on the centre, reached at most max_accel * dt per step
+  const float want_lat = -(lat + 0.5f * g_lat * t * t) / t, want_vert = -(vert + 0.5f * g_vert * t * t) / t;
+  float dl = want_lat - vlat, dvv = want_vert - vvert;
+  const float mag = std::hypot(dl, dvv), cap = rules.max_accel * dt;
+  if (mag > cap) {
+    dl *= cap / mag;
+    dvv *= cap / mag;
+  }
+  for (int k = 0; k < 3; ++k) dv[k] = dl * f.r[k] + dvv * f.u[k];
+  return true;
+}
+
+float RightRoll(Pose* p, float* omega, float dt, const RightRules& rules) {
+  // world up with its forward component removed: the "upright" up for this forward
+  const float wy[3] = {0, 1, 0};
+  float target[3];
+  const float d = Dot(wy, p->fwd);
+  for (int k = 0; k < 3; ++k) target[k] = wy[k] - d * p->fwd[k];
+  const float tl = std::sqrt(Dot(target, target));
+  if (tl < 0.1f) {  // looking (almost) straight up or down
+    *omega = 0.0f;
+    return 0.0f;
+  }
+  for (float& c : target) c /= tl;
+  // signed roll from up to target about fwd
+  float cr[3];
+  Cross3(p->up, target, cr);
+  const float sinr = Dot(cr, p->fwd), cosr = std::clamp(Dot(p->up, target), -1.0f, 1.0f);
+  const float roll = std::atan2(sinr, cosr) * 57.29578f;  // degrees, sign = direction to turn
+  const float aroll = std::abs(roll);
+  if (aroll < 0.05f) {
+    *omega = 0.0f;
+    return 0.0f;
+  }
+  const float want = std::min(rules.max_speed, rules.base + rules.rate * aroll / 180.0f);
+  *omega = std::min(want, *omega + rules.accel * dt);
+  const float step = std::min(aroll, *omega * dt) * (roll > 0 ? 1.0f : -1.0f) / 57.29578f;
+  // rotate up and right about fwd by `step` (Rodrigues; fwd is unit and perpendicular to both)
+  const float c = std::cos(step), s = std::sin(step);
+  auto rot = [&](float v[3]) {
+    float fx[3];
+    Cross3(p->fwd, v, fx);
+    for (int k = 0; k < 3; ++k) v[k] = v[k] * c + fx[k] * s;
+  };
+  rot(p->up);
+  rot(p->right);
+  return aroll - std::abs(step) * 57.29578f;
+}
+
 }  // namespace skate3::portal_math
