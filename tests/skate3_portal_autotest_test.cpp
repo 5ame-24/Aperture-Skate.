@@ -93,6 +93,19 @@ int main() {
   bool logged_best = false;
   for (const auto& l : h.log) logged_best |= l.find("AUTOTEST best: ") != std::string::npos;
   CHECK(logged_best);
+  {
+    // a drop that did not land over portal A is skipped and says so (not "no result")
+    Fake h2;
+    h2.refuse_next = 0;
+    Start(h2, ground, heading);
+    const float far[3] = {50, 2, 30};
+    for (double t2 = 0; t2 < 3.0; t2 += 0.05) Step(h2, t2, false, far, true);
+    bool skipped = false;
+    for (const auto& l : h2.log) skipped |= l.find("skipped: the skater is not at the drop point") != std::string::npos;
+    CHECK(skipped);
+    Stop(h2, "test");
+    CHECK(!Running());
+  }
   std::puts("skate3_portal_autotest_test: ok");
   return 0;
 }

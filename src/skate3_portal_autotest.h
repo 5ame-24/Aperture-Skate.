@@ -46,6 +46,7 @@ struct Result {
   bool launch = false;          // an upward launch (FLING result line)
   float rule_rise = 0, rose = 0;
   float kept = 0, heading = -1;  // CROSSCHECK +20 (horizontal exits)
+  float entry_vy = 0, exit_vy = 0;  // the crossing's entry / exit vertical speed (m/s)
 };
 
 bool Running();
@@ -54,8 +55,8 @@ std::string Status();
 // Start from the skater's ground position and heading (unit horizontal).
 void Start(Host& host, const float ground[3], const float heading[2]);
 void Stop(Host& host, const char* why);
-// Once per human update: now = seconds; crossed = a crossing armed this update.
-void Step(Host& host, double now, bool crossed);
+// Once per human update: now = seconds; crossed = a crossing armed this update; skater = its tracked position (have = false when lost).
+void Step(Host& host, double now, bool crossed, const float skater[3] = nullptr, bool have = false);
 void Report(const Result& r);
 
 // For tests: the summary of the results so far (one line per setting).

@@ -145,6 +145,7 @@ REXCVAR_DEFINE_DOUBLE(skate3_portal_probe_teleport, 0.0, "Skate 3",
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
 // Defined with the integrator hook, further down (global scope); called from GateStep.
+bool OwnBodyVelocity(float out[3]);
 void BodiesFrame(uint8_t* base, const float skater[3], const float skater_v[2], const float hand[3], float dt);
 bool BodiesGrabToggle(uint8_t* base, const float skater[3], const float skater_v[2], const float aim_o[3], const float aim_d[3],
                       bool aim_ok, const float hand[3], float cube_score);
@@ -455,6 +456,9 @@ bool IsPlayer(uint8_t* base, uint32_t self, const float pos[3]) {
 // The human skater's actor, locked the first time one matches the presentation entity: at spawn the human is
 // the only skater, but later the roaming park skaters appear and the entity helper can return one of them.
 std::atomic<uint32_t> g_human{0};
+bool g_own_v_have = false;
+float g_own_v_last[3] = {};
+bool g_track_restart = false;  // consumed by GateStep: forget the tracked point (re-acquire from the riding position)
 
 // Arm the game's own relocation (the marker path) with a ready 4x4 target matrix; shared by the gate crossing.
 bool ArmTeleport(uint8_t* base, uint32_t sp, uint32_t self, uint32_t flags, const float (&target)[16]) {
@@ -2186,6 +2190,11 @@ bool GateStep(PPCContext& ctx, uint8_t* base, uint32_t self) {
     return false;
   }
   const float place_pos[3] = {ground[0], ground[1] + up_offset, ground[2]};
+  g_own_v_have = OwnBodyVelocity(g_own_v_last);
+  if (g_track_restart) {
+    g_track_restart = false;
+    have = false;  // the next riding frame (or the locked entity) gives the position again
+  }
   // AUTOTEST: start / stop from the key, step the sequencer, and arm its teleports (a drop from a set height above the entry portal)
   if (skate3::portal_gate::TakeAutotest()) {
     if (skate3::portal_autotest::Running()) {
@@ -2198,7 +2207,7 @@ bool GateStep(PPCContext& ctx, uint8_t* base, uint32_t self) {
     }
   }
   if (skate3::portal_autotest::Running()) {
-    skate3::portal_autotest::Step(g_at_host, double(std::chrono::steady_clock::now().time_since_epoch().count()) * 1e-9, g_at_crossed);
+    skate3::portal_autotest::Step(g_at_host, double(std::chrono::steady_clock::now().time_since_epoch().count()) * 1e-9, g_at_crossed, tracked, have);
     g_at_crossed = false;
     if (g_at_tp_pending && !(flags & kRelocateBit)) {
       const float hx = g_at_tp_h[0], hz = g_at_tp_h[1];
@@ -2300,7 +2309,12 @@ bool GateStep(PPCContext& ctx, uint8_t* base, uint32_t self) {
         }
         return false;
       }
-      REXLOG_INFO("portal-probe: FPVTRACK [f {}] accepted a {:.1f} m relocation after {} riding frames", g_gate_frame, jump, jump_frames);
+      {
+        uint32_t rst = 0;
+        ReadBe32(base, self + 1336, &rst);
+        REXLOG_INFO("portal-probe: FPVTRACK [f {}] accepted a {:.1f} m relocation after {} riding frames (state {}, flags {:08X}, actor {:08X}, autotest {})",
+                    g_gate_frame, jump, jump_frames, rst, flags, self, skate3::portal_autotest::Running() ? "running" : "off");
+      }
     }
     jump_frames = 0;
   }
@@ -2381,6 +2395,8 @@ bool GateStep(PPCContext& ctx, uint8_t* base, uint32_t self) {
               skate3::portal_autotest::Result ar;
               ar.kept = kept;
               ar.heading = hv >= 1.0f ? h_err : -1.0f;
+              ar.entry_vy = g_check.vin[1];
+              ar.exit_vy = g_check.vout[1];
               skate3::portal_autotest::Report(ar);
             }
           }
@@ -2667,7 +2683,12 @@ bool GateStep(PPCContext& ctx, uint8_t* base, uint32_t self) {
   // on the board, the actor's world velocity on foot) instead of the smoothed position estimate, which lags a frame or two and jumps with
   // tracking. The estimate stays the fallback when a store disagrees wildly (a stale or exploded store).
   float v_entry[3] = {vel3[0], vel3[1], vel3[2]};
-  {
+  const float own_l = std::sqrt(g_own_v_last[0] * g_own_v_last[0] + g_own_v_last[1] * g_own_v_last[1] + g_own_v_last[2] * g_own_v_last[2]);
+  const float est_l = std::sqrt(vel3[0] * vel3[0] + vel3[1] * vel3[1] + vel3[2] * vel3[2]);
+  if (g_own_v_have && own_l < kMaxExitSpeed && (own_l >= 0.5f * est_l || est_l < 2.0f)) {  // (bodies at rest while the skater moves = driven, not physical)
+    // the skater's own bodies: the physical velocity (preferred over the board rates and the position estimate)
+    std::copy(g_own_v_last, g_own_v_last + 3, v_entry);
+  } else {
     uint32_t est = 0, bd = 0, bk = 0;
     ReadBe32(base, self + 1336, &est);
     float sv[3] = {0, 0, 0};
@@ -3495,8 +3516,32 @@ extern "C" REX_FUNC(sub_82DB6EC0) {
   __imp__sub_82DB6EC0(ctx, base);
 }
 
+// Run 216: after the game's Object Dropper the tracked point froze for good (gun and first person stuck under the map): GateStep only runs for
+// the locked human actor, and that actor stopped updating (replaced or parked). The lock moves to another actor that matches the human's
+// presentation entity once the locked one has had no update for 1 s; tracking restarts from it.
+std::atomic<int64_t> g_human_seen_ns{0};
+void HumanLockWatch(uint8_t* base, uint32_t self) {
+  const int64_t now = std::chrono::steady_clock::now().time_since_epoch().count();
+  if (self == g_human) {
+    g_human_seen_ns = now;
+    return;
+  }
+  const uint32_t old = g_human;
+  if (!old || now - g_human_seen_ns.load() < 1'000'000'000ll) return;
+  float pos[3];
+  if (!skate3::native_entity::SkaterWorldPos(base, pos) || !IsPlayer(base, self, pos)) return;
+  uint32_t st = 0;
+  ReadBe32(base, self + 1336, &st);
+  REXLOG_INFO("portal-probe: human skater actor RE-LOCKED: {:08X} -> {:08X} (the old one had no update for {:.1f} s; state {}); tracking restarts",
+              old, self, float(now - g_human_seen_ns.load()) * 1e-9f, st);
+  g_human = self;
+  g_human_seen_ns = now;
+  g_track_restart = true;
+}
+
 extern "C" REX_FUNC(sub_82DB88C8) {
   const uint32_t self = ctx.r3.u32;
+  HumanLockWatch(base, self);
   const bool hop_armed = ArmRelocation(base, ctx.r1.u32, self);
   const bool gate_armed = !hop_armed && skate3::portal_gate::Enabled() && self == g_human &&
                           GateStep(ctx, base, self);
@@ -3582,6 +3627,8 @@ extern "C" REX_FUNC(sub_82DB88C8) {
         ar.launch = true;
         ar.rule_rise = vy > 0 ? vy * vy / (2.0f * g) : 0.0f;
         ar.rose = rose;
+        ar.entry_vy = -g_fexit.fall_in;
+        ar.exit_vy = vy;
         skate3::portal_autotest::Report(ar);
       }
       REXLOG_INFO("portal-probe: FLING #{} [{}]: fell in at {:.1f} m/s, out at {:.1f} m/s up; Portal rule: rise {:.1f} m; rose {:.2f} m, top upward speed "
@@ -3972,6 +4019,9 @@ std::unordered_map<uint32_t, int64_t> g_body_cooldown;  // a moved body is not m
 // Bodies that have ever been the skater's own (600+ updates beside them): the board and skeleton parts lose their near_frames when the entry
 // expires after a few idle seconds, and a board lying still then looked like a prop (run 149: the self-test picked the skateboard).
 std::unordered_set<uint32_t> g_own_ids;
+float g_own_v_acc[3] = {};  // guarded by g_body_mutex
+int g_own_v_n = 0;
+int64_t g_own_v_ns = 0;
 constexpr int kOwnFrames = 150;                          // near_frames at which a body counts as the skater's own
 
 // A moved group followed for ~2 s (one line per 6 frames): where it is, how it is spread, how fast, and whether it still hangs
@@ -4022,6 +4072,23 @@ void RecordBody(uint8_t* base, uint32_t body) {
   std::copy(p, p + 3, s.p);
   std::copy(v, v + 3, s.v);
   s.ns = now;
+  if (g_own_ids.count(body) && std::isfinite(v[0] + v[1] + v[2])) {
+    for (int c = 0; c < 3; ++c) g_own_v_acc[c] += v[c];
+    ++g_own_v_n;
+    g_own_v_ns = now;
+  }
+}
+
+// The skater's own bodies' mean velocity over the last update (the physical state carry writes; run 216: after a test teleport the board
+// rates and the position estimate read ~0 while the skater fell, so floor->floor drops were scored as level exits). GateStep takes it.
+bool OwnBodyVelocity(float out[3]) {
+  std::lock_guard<std::mutex> lock(g_body_mutex);
+  const int64_t now = std::chrono::steady_clock::now().time_since_epoch().count();
+  const bool ok = g_own_v_n >= 2 && now - g_own_v_ns < 100'000'000;
+  if (ok) for (int c = 0; c < 3; ++c) out[c] = g_own_v_acc[c] / float(g_own_v_n);
+  for (float& x : g_own_v_acc) x = 0.0f;
+  g_own_v_n = 0;
+  return ok;
 }
 
 // Everything connected to `seed` (bodies seen in the last 0.3 s within 0.8 m of another member): one object, a pile, a ragdoll.

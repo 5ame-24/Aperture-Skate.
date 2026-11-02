@@ -27,6 +27,14 @@ struct State {
     Result r;
   };
   std::vector<Row> rows;
+  // the skater's path while a trial waits: (seconds, horizontal distance to portal A, height above A), every 0.1 s
+  struct Sample {
+    float t, d, h;
+  };
+  std::vector<Sample> path;
+  double last_sample = 0;
+  float min_h = 1e9f, min_d = 1e9f;
+  bool checked_spot = false, skipped = false;
 } g;
 
 const char* ScenarioName(Scenario s) { return s == Scenario::kFloorFloor ? "floor->floor" : "floor->wall"; }
@@ -142,7 +150,7 @@ void Report(const Result& r) {
   g.have_result = true;
 }
 
-void Step(Host& host, double now, bool crossed) {
+void Step(Host& host, double now, bool crossed, const float skater[3], bool have) {
   if (g.phase == Phase::kIdle) return;
   if (crossed) g.crossed = true;
   if (g.index >= g.plan.size()) {
@@ -174,29 +182,68 @@ void Step(Host& host, double now, bool crossed) {
         g.phase_t = now;
         g.have_result = false;
         g.crossed = false;
+        g.path.clear();
+        g.last_sample = now;
+        g.min_h = g.min_d = 1e9f;
+        g.checked_spot = g.skipped = false;
       }
       break;
     }
     case Phase::kWait: {
-      const bool timeout = now - g.phase_t > 6.0;
+      if (have && skater) {
+        const float d = std::hypot(skater[0] - a[0], skater[2] - a[2]), hh = skater[1] - a[1];
+        if (now - g.last_sample >= 0.1 && g.path.size() < 60) {
+          g.path.push_back({float(now - g.phase_t), d, hh});
+          g.last_sample = now;
+        }
+        if (!g.crossed) g.min_h = std::min(g.min_h, hh), g.min_d = std::min(g.min_d, d);
+        // 0.6 s after the drop the skater must be over portal A; if not, the drop did not happen where planned: skip, say so
+        if (!g.checked_spot && now - g.phase_t > 0.6) {
+          g.checked_spot = true;
+          if (!g.crossed && d > 3.0f) {
+            char b3[160];
+            std::snprintf(b3, sizeof(b3), "AUTOTEST trial %zu/%zu skipped: the skater is not at the drop point (%.1f m from portal A)", g.index + 1,
+                          g.plan.size(), d);
+            host.Log(b3);
+            g.skipped = true;
+          }
+        }
+      }
+      const bool timeout = now - g.phase_t > 6.0 || g.skipped;
       // a launch result comes ~1.5 s after its exit; a horizontal exit's CROSSCHECK after 20 updates
       if (g.have_result || timeout) {
         g.rows.push_back({t, g.have_result, g.result});
-        char b2[200];
+        char b2[320];
         if (!g.have_result) {
-          std::snprintf(b2, sizeof(b2), "AUTOTEST trial %zu/%zu [%s] %s from %.0f m: no result (%s)", g.index + 1, g.plan.size(),
-                        Settings()[size_t(t.setting)].name.c_str(), ScenarioName(t.scenario), t.height,
-                        g.crossed ? "crossed, no measurement" : "never reached the portal");
+          // why: never fell (stuck high: a ceiling or an obstacle above the drop), fell beside the portal, or crossed but not measured
+          const char* why = g.skipped                        ? "skipped: not at the drop point"
+                            : g.crossed                      ? "crossed, no measurement"
+                            : g.min_h > t.height - 1.0f       ? "did not fall (blocked above the drop: a ceiling or an obstacle?)"
+                            : g.min_d > 2.0f                  ? "fell beside the portal"
+                                                              : "reached the portal, no crossing";
+          std::snprintf(b2, sizeof(b2), "AUTOTEST trial %zu/%zu [%s] %s from %.0f m: no result (%s; lowest %.1f m above A, closest %.1f m)", g.index + 1,
+                        g.plan.size(), Settings()[size_t(t.setting)].name.c_str(), ScenarioName(t.scenario), t.height, why, g.min_h, g.min_d);
         } else if (g.result.launch) {
-          std::snprintf(b2, sizeof(b2), "AUTOTEST trial %zu/%zu [%s] %s from %.0f m: rose %.2f m of the rule's %.2f (%.0f%%)", g.index + 1,
-                        g.plan.size(), Settings()[size_t(t.setting)].name.c_str(), ScenarioName(t.scenario), t.height, g.result.rose,
-                        g.result.rule_rise, g.result.rule_rise > 0.1f ? 100.0f * g.result.rose / g.result.rule_rise : 0.0f);
+          std::snprintf(b2, sizeof(b2), "AUTOTEST trial %zu/%zu [%s] %s from %.0f m: rose %.2f m of the rule's %.2f (%.0f%%), in %.1f / out %.1f m/s up",
+                        g.index + 1, g.plan.size(), Settings()[size_t(t.setting)].name.c_str(), ScenarioName(t.scenario), t.height, g.result.rose,
+                        g.result.rule_rise, g.result.rule_rise > 0.1f ? 100.0f * g.result.rose / g.result.rule_rise : 0.0f, g.result.entry_vy,
+                        g.result.exit_vy);
         } else {
-          std::snprintf(b2, sizeof(b2), "AUTOTEST trial %zu/%zu [%s] %s from %.0f m: kept %.0f%%, heading off %.0f deg", g.index + 1,
-                        g.plan.size(), Settings()[size_t(t.setting)].name.c_str(), ScenarioName(t.scenario), t.height, g.result.kept,
-                        g.result.heading);
+          std::snprintf(b2, sizeof(b2), "AUTOTEST trial %zu/%zu [%s] %s from %.0f m: kept %.0f%%, heading off %.0f deg, in %.1f / out %.1f m/s vertical%s",
+                        g.index + 1, g.plan.size(), Settings()[size_t(t.setting)].name.c_str(), ScenarioName(t.scenario), t.height, g.result.kept,
+                        g.result.heading, g.result.entry_vy, g.result.exit_vy,
+                        t.scenario == Scenario::kFloorFloor ? " (a floor->floor drop scored as a level exit: the exit was not upward)" : "");
         }
         host.Log(b2);
+        {
+          std::string pl = "AUTOTEST   path (s: m from A, m above A):";
+          for (size_t i = 0; i < g.path.size(); i += 2) {
+            char b4[40];
+            std::snprintf(b4, sizeof(b4), " %.1f: %.1f %+.1f", g.path[i].t, g.path[i].d, g.path[i].h);
+            pl += b4;
+          }
+          host.Log(pl);
+        }
         host.ClearPortals();  // (a floor-floor pair would loop the skater forever)
         g.phase = Phase::kRest;
         g.phase_t = now;

@@ -302,11 +302,21 @@ uint16_t ModifierMask() {
 
 bool Enabled() { return REXCVAR_GET(skate3_portal_gate); }
 
+std::atomic<int64_t> g_tracked_ns{0};
+bool TrackingStale() {
+  const int64_t t = g_tracked_ns.load();
+  return t != 0 && now_ns() - t > 1'500'000'000ll;
+}
+
 void Request(int what) {
   // The bind auto-repeats while the key is held; one press is enough.
   static std::atomic<int64_t> last_ns{0};
   const int64_t now = std::chrono::steady_clock::now().time_since_epoch().count();
   REXLOG_INFO("portal-gate: key bind {} received (gate {})", what, Enabled() ? "enabled" : "DISABLED");
+  if (Enabled() && (what == 0 || what == 1) && TrackingStale()) {
+    REXLOG_INFO("portal-gate: shot ignored: the skater is lost (no position update for {:.1f} s)", float(now_ns() - g_tracked_ns.load()) * 1e-9f);
+    return;
+  }
   if (Enabled() && now - last_ns.load() > 500'000'000) {
     last_ns = now;
     if (what == 2 && portal_gel::Mode()) {  // in gel mode "clear" removes the paint, the portals stay
@@ -1016,7 +1026,10 @@ void NoteSurfaceDrawn() { g_surface_ns = now_ns(); }
 
 bool SurfaceDrawnRecently() { return now_ns() - g_surface_ns.load() < 400'000'000 && g_surface_ns.load() != 0; }
 
-bool FpvActive() { return Enabled() && REXCVAR_GET(skate3_portal_fpv); }
+// Tracking freshness (run 216: the tracked point froze after the Object Dropper and the gun / first person stayed under the map): the skater's
+// position comes from Step(), once per human update. No update for 1.5 s = lost: the gun does not fire and first person hands the camera
+// back until updates come again (the probe re-locks the human actor meanwhile).
+bool FpvActive() { return Enabled() && REXCVAR_GET(skate3_portal_fpv) && !TrackingStale(); }
 
 void ToggleFpv() {
   if (!Enabled()) return;
@@ -1434,6 +1447,7 @@ bool Step(const float pos[3], bool allowed, unsigned flags, Cross* out) {
   std::lock_guard<std::mutex> lock(g_mutex);
   std::copy(pos, pos + 3, g_tracked);
   g_tracked_valid = true;
+  g_tracked_ns = now_ns();
   if (g_pending.load() == 2) {
     g_pending = -1;
     g_gates[0].active = g_gates[1].active = false;
@@ -1599,6 +1613,10 @@ void Overlay::OnDraw(ImGuiIO& io) {
                      REXCVAR_GET(skate3_portal_gate_mouse)
                          ? "PORTAL GUN ON  (aim with the mouse: left click blue, right click orange, middle clear)"
                          : "PORTAL GUN ON  (hold D-pad down: right stick aims, RT blue, LT orange, Y clear, R1 grab, X cube; or Ctrl+1/2/3, Ctrl+G, Ctrl+5)");
+  if (TrackingStale()) {
+    ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "LOST THE SKATER (no update for %.0f s): gun and first person paused, re-acquiring",
+                       float(now_ns() - g_tracked_ns.load()) * 1e-9f);
+  }
   ImGui::TextColored(ImVec4(0.6f, 0.8f, 1.0f, 1.0f), "fling: %s (Ctrl+F)  |  Ctrl+Shift+T: AUTOTEST", FlingModeName(FlingMode()));
   if (const std::string at = portal_autotest::Status(); !at.empty()) ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.2f, 1.0f), "%s", at.c_str());
   if (portal_gel::Mode()) {

@@ -933,3 +933,17 @@ Actor offsets: +1200/+1216 ground pos, +1232 delta, +1248 velocity, +1296 flags,
     floor-floor pair would loop). Repeated under 3 carry settings (default / no arc move / 0.5 s arc + 0.8 s short); fitting off while it
     runs; every cvar restored at the end. Output: `AUTOTEST trial k/N [...] ...` lines, one summary line per setting with a score, `best:`,
     and skate3_portal_autotest.json (every trial) in the run folder. The overlay shows the running trial; Ctrl+Shift+T again stops it.
+84. Run 216 (AUTOTEST + a tracking freeze) -> fixes (built, untested).
+    - Freeze: after the game's Object Dropper the tracked point stopped for good (gun and first person stuck under the map). GateStep only
+      runs for the locked human actor, and that actor stopped updating. HumanLockWatch: once the locked actor has had no update for 1 s,
+      the lock moves to another actor matching the human's presentation entity (`human skater actor RE-LOCKED: old -> new ...`), tracking
+      restarts. And a guard: no tracked-position update for 1.5 s = lost: the gun does not fire, first person hands the camera back, the
+      banner says "LOST THE SKATER ...", until updates come again. Accepted relocations now log state, flags, actor and whether AUTOTEST
+      runs (the Object Dropper's moves showed as 12-69 m relocations).
+    - Entry velocity: the skater's own bodies' mean velocity (the physical state carry writes) is now preferred (board rates / estimate as
+      fallbacks; bodies at rest while the estimate moves = animation-driven, not used). After a test teleport both old stores read ~0 while
+      the skater fell, so floor->floor drops were scored as level exits ("kept 11%").
+    - AUTOTEST: each trial logs the skater's path (every 0.2 s: m from portal A, m above it) and the entry / exit vertical speed; a trial
+      without a result says why (did not fall: a ceiling or an obstacle above the drop; fell beside the portal; reached it without crossing;
+      crossed without a measurement); a drop that did not land over portal A within 0.6 s is skipped and says so. Same three settings.
+      Note: run it outdoors or under a high roof (drops go up to 10 m above the floor).
