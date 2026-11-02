@@ -864,6 +864,14 @@ struct FlingExit {
   int64_t t0 = 0;
 } g_fexit;
 int g_fexit_seq = 0;
+// CARRY (fling mode "carry"): the skater's own physics bodies (g_own_ids) get v(t) = v_out - g t after each physics update, from the end of
+// the teleport to the top of the arc (1.5 s at most): the integrator itself flies the skater, instead of stores the riding model rewrites.
+struct Carry {
+  std::atomic<bool> active{false};
+  float vout[3] = {}, gravity = 9.81f;
+  int64_t t0 = 0, until = 0;
+  std::atomic<int> writes{0};
+} g_carry;
 bool g_fling_steep_exit = false;  // set by the crossing: |v_out.y| > half its speed, or out of a floor upward
 int g_recover_window = 0;  // frames after a crossing in which the game's own recovery warps keep the board's rates
 
@@ -3391,8 +3399,18 @@ extern "C" REX_FUNC(sub_82DB88C8) {
       // the teleport is over (the game put the skater down riding): get airborne the chosen way, so the held exit velocity sticks
       g_fexit.pending = false;
       g_onboard_frames = 0;  // every mode releases the on-board byte
-      if (g_fexit.mode == 0) {
+      if (g_fexit.mode == 0 || g_fexit.mode == 4) {
         skate3::portal_gate::RequestOllie();  // the game's own pop
+      }
+      if (g_fexit.mode == 4) {
+        const int64_t now = std::chrono::steady_clock::now().time_since_epoch().count();
+        std::copy(g_fling.vout, g_fling.vout + 3, g_carry.vout);
+        g_carry.gravity = g_fling.gravity;
+        g_carry.t0 = now;
+        const float apex = g_fling.vout[1] > 0 ? g_fling.vout[1] / std::max(1.0f, g_fling.gravity) : 0.3f;
+        g_carry.until = now + int64_t(std::clamp(apex, 0.3f, 1.5f) * 1e9);
+        g_carry.writes = 0;
+        g_carry.active = true;
       } else if (g_fexit.mode == 1) {
         uint32_t fl = 0, skel = 0, w = 0;
         WriteBe32(base, self + 1336, 200);
@@ -3434,8 +3452,9 @@ extern "C" REX_FUNC(sub_82DB88C8) {
       const float portal_rise = vy > 0 ? vy * vy / (2.0f * g) : 0.0f;
       const float rose = g_fexit.peak - g_fexit.y0;
       REXLOG_INFO("portal-probe: FLING #{} [{}]: fell in at {:.1f} m/s, out at {:.1f} m/s up; Portal rule: rise {:.1f} m; rose {:.2f} m, top upward speed "
-                  "{:.1f} m/s - {}", g_fexit.seq, skate3::portal_gate::FlingModeName(g_fexit.mode), g_fexit.fall_in, vy, portal_rise, rose,
-                  g_fexit.vy_max, portal_rise < 0.5f ? "not an upward fling" : rose > 0.5f * portal_rise ? "FLEW" : rose > 0.15f * portal_rise ? "partly"
+                  "{:.1f} m/s{} - {}", g_fexit.seq, skate3::portal_gate::FlingModeName(g_fexit.mode), g_fexit.fall_in, vy, portal_rise, rose,
+                  g_fexit.vy_max, g_fexit.mode == 4 ? (", " + std::to_string(g_carry.writes.load()) + " body velocity writes").c_str() : "",
+                  portal_rise < 0.5f ? "not an upward fling" : rose > 0.5f * portal_rise ? "FLEW" : rose > 0.15f * portal_rise ? "partly"
                                                                                                                       : "NOT FLYING");
     }
   }
@@ -4572,6 +4591,24 @@ extern "C" REX_FUNC(sub_82AE6590) {
   const uint32_t body = ctx.r3.u32;
   __imp__sub_82AE6590(ctx, base);
   if (skate3::portal_gate::Enabled()) RecordBody(base, body);
+  if (g_carry.active.load(std::memory_order_relaxed) && body >= 0x10000 && body < 0xC0000000 && !(body & 3)) {
+    const int64_t now = std::chrono::steady_clock::now().time_since_epoch().count();
+    if (now > g_carry.until) {
+      g_carry.active = false;
+    } else {
+      bool own;
+      {
+        std::lock_guard<std::mutex> lock(g_body_mutex);
+        own = g_own_ids.count(body) != 0;
+      }
+      if (own) {
+        const float t = float(now - g_carry.t0) * 1e-9f;
+        const float v[3] = {g_carry.vout[0], g_carry.vout[1] - g_carry.gravity * t, g_carry.vout[2]};
+        for (int c = 0; c < 3; ++c) WriteBeFloat(base, body + 32 + 4 * c, v[c]);
+        g_carry.writes.fetch_add(1, std::memory_order_relaxed);
+      }
+    }
+  }
   if (skate3::portal_gel::Count() > 0 && skate3::portal_gel::Enabled() && body >= 0x10000 && body < 0xC0000000 && !(body & 3)) {
     // GEL: loose props bounce off blue paint (velocity at body+32, position at +16). Not the skater's or a character's bodies.
     float bp[3], bv[3], nv[3];

@@ -893,3 +893,8 @@ Actor offsets: +1200/+1216 ground pos, +1232 delta, +1248 velocity, +1296 flags,
       end, restarts its clock at the mode's move (ollie / air / lift / release), and "converged" only counts AIRBORNE frames.
     - One line per fling: `FLING #n [mode]: fell in at A m/s, out at B m/s up; Portal rule: rise R m; rose X m, top upward speed V m/s -
       FLEW | partly | NOT FLYING` (Portal rule, spec 001: the exit keeps the entry speed along its normal, no clamp: rise = B^2 / 2g).
+79. Run 214: "none flew, none felt right" (all five... four modes). Built (untested): fling mode "carry" (new default). At a fling exit's
+    teleport end: the on-board byte is released, the ollie flick is played, and until the top of the arc (1.5 s at most) every one of the
+    skater's own physics bodies (g_own_ids: bodies that spent 600 updates within 1.5 m of the skater) gets v(t) = v_out - g t written right
+    after its rigid-body update (82AE6590), so the integrator itself flies the skater instead of stores the riding model rewrites. The result
+    line adds "N body velocity writes" (0 = the skater's bodies are not known yet or not integrated there).

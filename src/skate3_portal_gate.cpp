@@ -60,9 +60,10 @@ REXCVAR_DEFINE_DOUBLE(skate3_portal_gate_open_time, 0.25, "Skate 3",
                       "Seconds a new portal takes to open (it grows from its centre with a small overshoot, as in Portal); 0 = instant.")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
-REXCVAR_DEFINE_STRING(skate3_portal_fling_mode, "ollie", "Skate 3",
+REXCVAR_DEFINE_STRING(skate3_portal_fling_mode, "carry", "Skate 3",
                       "How a fling exit (steep / upward) gets airborne, so the held exit velocity sticks (the game ends every teleport riding, "
-                      "and riding drops upward speed): ollie = the right-stick ollie flick is played for you at the exit (the game's own pop); "
+                      "and riding drops upward speed): carry = ollie plus the skater's own physics bodies are given the exit velocity "
+                      "(gravity included) after every physics update until the top of the arc; ollie = the right-stick ollie flick is played for you at the exit (the game's own pop); "
                       "air = the air state is set directly; lift = the exit starts 3 m up, out of reach of the ground snap; release = only "
                       "the on-board byte is released. Ctrl+F cycles.")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
@@ -1069,21 +1070,22 @@ bool WalkIntent(float dir[2], float* magnitude) {
 }
 
 // FPVWALK: in portal first person on foot, the walking stick re-expressed relative to the shown view (portal_math::RemapStick).
-static const char* kFlingModes[] = {"ollie", "air", "lift", "release"};
+static const char* kFlingModes[] = {"ollie", "air", "lift", "release", "carry"};
+constexpr int kFlingModeCount = 5;
 int FlingMode() {
   const std::string m = REXCVAR_GET(skate3_portal_fling_mode);
-  for (int i = 0; i < 4; ++i)
+  for (int i = 0; i < kFlingModeCount; ++i)
     if (m == kFlingModes[i]) return i;
-  return 0;
+  return 4;
 }
-const char* FlingModeName(int m) { return kFlingModes[m >= 0 && m < 4 ? m : 0]; }
+const char* FlingModeName(int m) { return kFlingModes[m >= 0 && m < kFlingModeCount ? m : 4]; }
 void CycleFlingMode() {
   static std::atomic<int64_t> last{0};
   if (now_ns() - last.load() < 400'000'000) return;
   last = now_ns();
-  const int next = (FlingMode() + 1) % 4;
+  const int next = (FlingMode() + 1) % kFlingModeCount;
   rex::cvar::SetFlagByName("skate3_portal_fling_mode", kFlingModes[next]);
-  REXLOG_INFO("portal-gate: FLING mode now {} (Ctrl+F cycles ollie / air / lift / release)", kFlingModes[next]);
+  REXLOG_INFO("portal-gate: FLING mode now {} (Ctrl+F cycles ollie / air / lift / release / carry)", kFlingModes[next]);
 }
 // The ollie flick played for the skater at a fling exit: right stick pulled down, then flicked up (the game's own pop), ~0.1 s each.
 std::atomic<int64_t> g_ollie_ns{0};
