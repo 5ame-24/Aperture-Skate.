@@ -6148,6 +6148,9 @@ float g_freecam_guest_view[16] = {};  // row-vector view, host endianness
 float g_freecam_guest_pos[3] = {};    // camera world position
 std::atomic<uint32_t> g_freecam_guest_active{0};
 std::atomic<uint64_t> g_freecam_guest_rewrites{0};
+std::mutex g_game_cam_mutex;
+float g_game_cam_view[16] = {};  // the game's own main-camera view (incoming SetViewMatrix argument), host endianness
+bool g_game_cam_have = false;
 struct FreecamState {
   bool engaged = false;
   double yaw = 0.0, pitch = 0.0;  // radians: yaw about world Y, then pitch
@@ -6385,6 +6388,20 @@ bool UpdateFreecam(FrameScene& scene, const float cam_view[16], double now) {
 
 // While the freecam is engaged, fills out_pos with the flown camera world
 // position and returns true. Consumed by the draw-distance hooks to
+bool GameCameraView(float out_view[16]) {
+  std::lock_guard<std::mutex> lock(g_game_cam_mutex);
+  if (!g_game_cam_have) return false;
+  std::memcpy(out_view, g_game_cam_view, sizeof(g_game_cam_view));
+  return true;
+}
+
+bool ShownCameraView(float out_view[16]) {
+  if (g_freecam_guest_active.load(std::memory_order_acquire) == 0) return false;
+  std::lock_guard<std::mutex> lock(g_freecam_guest_mutex);
+  std::memcpy(out_view, g_freecam_guest_view, sizeof(g_freecam_guest_view));
+  return true;
+}
+
 // recenter the guest distance culls on the drone.
 bool FreecamGuestPose(float out_pos[3]) {
   if (g_freecam_guest_active.load(std::memory_order_acquire) == 0) {
@@ -10510,6 +10527,23 @@ extern "C" REX_FUNC(sub_82802A00) {
   namespace ns = skate3::native_scene;
   const uint32_t cam = ctx.r3.u32;
   const uint32_t mtx = ctx.r4.u32;
+  if (mtx != 0 && cam == ns::g_sampler_viewcam.load(std::memory_order_relaxed)) {
+    // keep the game's own camera (before any rewrite): portal first person re-expresses the walking stick relative to it
+    float v[16];
+    bool ok = true;
+    for (int i = 0; i < 16 && ok; ++i) {
+      uint32_t raw;
+      std::memcpy(&raw, base + mtx + i * 4, 4);
+      raw = __builtin_bswap32(raw);
+      std::memcpy(&v[i], &raw, 4);
+      ok = std::isfinite(v[i]);
+    }
+    if (ok) {
+      std::lock_guard<std::mutex> lock(ns::g_game_cam_mutex);
+      std::memcpy(ns::g_game_cam_view, v, sizeof(v));
+      ns::g_game_cam_have = true;
+    }
+  }
   if (ns::g_freecam_guest_active.load(std::memory_order_acquire) != 0 &&
       mtx != 0 &&
       cam == ns::g_sampler_viewcam.load(std::memory_order_relaxed)) {

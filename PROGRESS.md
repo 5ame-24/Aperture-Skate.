@@ -787,6 +787,43 @@ Actor offsets: +1200/+1216 ground pos, +1232 delta, +1248 velocity, +1296 flags,
       (nearly) vertical (floor -> wall) the velocity heading is used; when the velocity is vertical too, the last heading turned through
       the pair. Logs `FACING learned: forward = entity matrix row/column k (+/-), agreement A`, `GATE exit facing from your facing (axis k): in
       (...) -> out (...); velocity heading out (...)`, `exit heading from your last heading`.
+71. Run 209 (HANDOFF 14): angles good (FACING agreement 0.93), rolling crossings kept 73% (was ~45%), airborne 53% (n 4), fitting works
+    (13 fits after nudging, 6 best effort, 2 does not fit), CHARSEL found a list row "Shingo" (ID 0x2F) at 400255B0. Human: "wall/floor
+    seems a little off". Built now (untested):
+    - CROSSCHECK per crossing: `CROSSCHECK #n [f N] wall->floor rolling: in (...) -> out (...), facing (...), came out X across / Y up from
+      the exit centre`, then at +10 and +20 updates: speed kept, heading off the expected exit direction, off the facing given, vertical vs
+      expected (v_out.y - g t), state, flags. crossings.py summarises by pair kind (wall->wall, floor->wall, wall->floor, ...).
+    - FACING: the axis is LOCKED once learned with agreement >= 0.9 (run 209: logged "row 0" but crossings used "axis 1": Best() drifted
+      while it kept learning; only 6 of 93 crossings used the facing). Each crossing that does not use it says why (`exit facing from the
+      velocity: <reason> (axis, agreement, samples)`).
+    - PORTALFIT: each failed rim point is named (right, upper right, top, ... bottom) with why (nothing within 1 m / hit X m in front of or
+      behind the plane, facing D); the surface and the portal size are in the final line. Steps grow (0.35 x (1 + 0.4 round)), 6 rounds,
+      2 m at most. Note: our portal is 5.2 x 4.0 m (Portal's 1.6 x 2.7 m), so "does not fit" on most walls lower than 4 m is expected
+      (local task T7 is the size cvar).
+    - CHARSEL: a list now needs text IDs >= 0x100 and 3 different names (ID 0x2F is a small number that matches by chance, so the 400255B0
+      row is suspect); skate3_portal_charsel_dump="400255B0,..." dumps -256..+768 bytes around each address at the end of a scan, with the
+      words that point at text annotated.
+72. Polish (built, untested):
+    - Portal size: one runtime size for the crossing oval, the hole, the drawn surfaces, the overlay, the rim probes and the overlap push
+      (portal_math::kHalfWidth/kHalfHeight are now set at run time; the gate uses them). skate3_portal_gate_shape "skate" (5.2 x 4.0 m,
+      default, as before) or "portal" (Portal's 1.63 x 2.74 m), skate3_portal_gate_size scale 0.5..2. Log `portal size now W x H m`.
+    - Opening: a new portal grows from its centre over skate3_portal_gate_open_time (0.25 s) with a small overshoot (ease-out-back), in the
+      renderer's surfaces (SurfaceShapes); the rim is thinner on small portals.
+    - Fizzle: a shot that placed nothing shows an expanding ring with sparks at the reticle in that portal's colour (0.35 s).
+    - skate3_portal_gate_fit_strict (off): Portal's rule, a portal that cannot fit is removed (fizzles) instead of kept.
+73. Portal walking in first person (user: "the walking mechanic from Portal present in FPV mode"; built, untested).
+    - FPVWALK (skate3_portal_fpv_walk, on): on foot (state 500) in portal first person, the left stick (and WASD, if the keyboard reaches
+      the game through the guest pad) moves you relative to where you LOOK, as in Portal. The game moves an on-foot skater relative to its
+      own third-person camera, which first person hides. The SetViewMatrix hook now keeps the game's own main-camera view before the
+      first-person rewrite (native_scene::GameCameraView; ShownCameraView = what you see); the pad filter (app_common passes the left
+      stick now) re-expresses the stick with portal_math::RemapStick (tested: both views' horizontal right / forward columns, so any sign
+      convention cancels). Riding is unchanged (the stick steers the board). Auto-centre is off while walking (it would chase strafes).
+    - Self-check: `FPVWALK walking X deg (mean, max) off the direction you push towards relative to your view, N samples` every 5 s
+      ("looks mirrored or unmapped" over 60 deg). No FPVWALK lines while walking in first person = the stick never reached the filter
+      (keyboard input that bypasses the guest pad).
+    - WALK probe (spec R9): while walking (> 1.2 m/s, 1 s clear of a crossing), 30 scans of actor +0..0x800 and skeleton +0..0x4100 for
+      vectors within 15% of the walking velocity; one line `WALK on-foot velocity carriers ... actor+0x... n/30; skeleton+0x... n/30`. That
+      store is what an on-foot portal crossing must turn and hold (Portal's on-foot flings), next round.
 
 ## Roadmap
 - Item dropper: add the rolled-back gel dropper (item 65) as an item dropper, since the tester thought it was a decent item.

@@ -33,3 +33,26 @@ if scored:
         if km:
             print(f"  {mode}: {len(km)} scored, mean kept {100*st.mean(km):.0f}% median {100*st.median(km):.0f}%"
                   f"{'  (rolling crossings: the wall-exit lift, PROGRESS 69)' if mode == 'riding' else ''}")
+# CROSSCHECK (PROGRESS 71): per kind of pair, speed kept and heading errors at +10 / +20 updates
+import collections
+kinds = {}
+by = collections.defaultdict(list)
+for line in open(path, errors="replace"):
+    m = re.search(r"CROSSCHECK #(\d+) \[f \d+\] (\S+) (rolling|airborne):", line)
+    if m:
+        kinds[m.group(1)] = (m.group(2), m.group(3))
+        continue
+    m = re.search(r"CROSSCHECK #(\d+) (\S+) \+(\d+): speed [\d.]+ of [\d.]+ m/s \((\d+)%\), heading off the expected exit by (n/a|[\d.]+ deg), "
+                  r"off the facing given by (n/a|[\d.]+ deg), vertical (-?[\d.]+) \(expected (-?[\d.]+)\)", line)
+    if m:
+        h = None if m.group(5) == "n/a" else float(m.group(5).split()[0])
+        f = None if m.group(6) == "n/a" else float(m.group(6).split()[0])
+        by[(m.group(2), int(m.group(3)) >= 20)].append((int(m.group(4)), h, f, float(m.group(7)), float(m.group(8))))
+if by:
+    print("CROSSCHECK by pair (at +10 and +20 updates): n, speed kept median, heading error median, facing error median, vertical - expected median")
+    for (kind, late), rows in sorted(by.items()):
+        hs = [r[1] for r in rows if r[1] is not None]
+        fs = [r[2] for r in rows if r[2] is not None]
+        print(f"  {kind:16} {'+20' if late else '+10'}: n {len(rows):3}, kept {st.median(r[0] for r in rows):4.0f}%, heading off "
+              f"{st.median(hs) if hs else float('nan'):5.1f} deg, facing off {st.median(fs) if fs else float('nan'):5.1f} deg, "
+              f"vertical error {st.median(r[3] - r[4] for r in rows):+5.1f} m/s")

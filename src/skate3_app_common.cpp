@@ -796,8 +796,11 @@ void Skate3BaseApp::OnPostSetup() {
     input_system->SetGuestPadFilter([](rex::input::X_INPUT_GAMEPAD* g) {
       uint16_t b = static_cast<uint16_t>(g->buttons);
       int16_t rx = static_cast<int16_t>(g->thumb_rx), ry = static_cast<int16_t>(g->thumb_ry);
+      int16_t lx = static_cast<int16_t>(g->thumb_lx), ly = static_cast<int16_t>(g->thumb_ly);
       uint8_t lt = g->left_trigger, rt = g->right_trigger;
-      skate3::portal_gate::FilterPad(&b, &lt, &rt, &rx, &ry);
+      skate3::portal_gate::FilterPad(&b, &lt, &rt, &rx, &ry, &lx, &ly);
+      g->thumb_lx = lx;
+      g->thumb_ly = ly;
       g->buttons = b;
       g->thumb_rx = rx;
       g->thumb_ry = ry;

@@ -24,6 +24,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <vector>
 
@@ -121,6 +122,11 @@ REXCVAR_DEFINE_DOUBLE(skate3_portal_probe_teleport, 0.0, "Skate 3",
 void BodiesFrame(uint8_t* base, const float skater[3], const float skater_v[2], const float hand[3], float dt);
 bool BodiesGrabToggle(uint8_t* base, const float skater[3], const float skater_v[2], const float aim_o[3], const float aim_d[3],
                       bool aim_ok, const float hand[3], float cube_score);
+
+REXCVAR_DEFINE_STRING(skate3_portal_charsel_dump, "", "Skate 3",
+                      "CHARSEL: comma-separated hex addresses whose surroundings are dumped at the end of a scan (-256..+768 bytes, each word "
+                      "annotated when it points at text or is a known text ID), e.g. 400255B0.")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
 REXCVAR_DEFINE_STRING(skate3_portal_charsel_names, "Shingo", "Skate 3",
                       "CHARSEL (Ctrl+Shift+9): comma-separated character names to look for in guest memory, to find the game's own "
@@ -481,6 +487,7 @@ void WriteBeFloats(uint8_t* base, uint32_t addr, const float* v, int n) {
 void GunFallback(const float skater[3]) {
   if (g_ray.free_aim) {
     REXLOG_INFO("portal-probe: GUN no wall under the reticle, no portal");
+    skate3::portal_gate::NoteFizzle(g_ray.which);
   } else {
     skate3::portal_gate::PlaceAhead(g_ray.which, skater);
   }
@@ -1519,7 +1526,7 @@ std::string fmt_list_hint(int stride, int n) {
   return b;
 }
 
-void CharselScan(uint8_t* base, std::string names) {
+void CharselScan(uint8_t* base, std::string names, std::string dumps) {
   struct Range {
     uint32_t lo, hi;
   };
@@ -1758,14 +1765,27 @@ void CharselScan(uint8_t* base, std::string names) {
               uint32_t w = 0;
               if (!word_at(at + uint32_t(dir * k) * stride, &w)) break;
               const auto it = id_text.find(w);
-              if (it == id_text.end()) break;
+              if (it == id_text.end() || w < 0x100) break;  // (run 209: ID 0x2F; small numbers match by chance)
               ++n;
               if (got.size() < 300) got += (got.empty() ? "" : ", ") + it->second;
             }
           }
           if (n > best_n) best_n = n, best_stride = int(stride), best_names = got;
         }
-        const bool listy = best_n >= 3;
+        // a list: 3+ neighbours with known (not tiny) text IDs, naming at least 3 different things
+        int distinct = 0;
+        {
+          std::vector<std::string> seen;
+          size_t p0 = 0;
+          while (p0 < best_names.size() && distinct < 3) {
+            size_t q0 = best_names.find(", ", p0);
+            const std::string nm = best_names.substr(p0, q0 == std::string::npos ? std::string::npos : q0 - p0);
+            if (std::find(seen.begin(), seen.end(), nm) == seen.end()) seen.push_back(nm), ++distinct;
+            if (q0 == std::string::npos) break;
+            p0 = q0 + 2;
+          }
+        }
+        const bool listy = best_n >= 3 && distinct >= 3 && idw >= 0x100;
         if (shown_ids++ < 24 || listy) {
           std::string words_s;
           row_line(at - 16, 48, &words_s);
@@ -1786,6 +1806,38 @@ void CharselScan(uint8_t* base, std::string names) {
       }
     }
   }
+  // raw dumps of chosen addresses (skate3_portal_charsel_dump): the row the last scan pointed at, its neighbours, its fields
+  {
+    size_t p0 = 0;
+    while (p0 < dumps.size()) {
+      size_t q0 = dumps.find(',', p0);
+      if (q0 == std::string::npos) q0 = dumps.size();
+      const std::string tok = dumps.substr(p0, q0 - p0);
+      p0 = q0 + 1;
+      const uint32_t at = uint32_t(std::strtoul(tok.c_str(), nullptr, 16));
+      if (at < 0x10000) continue;
+      REXLOG_INFO("portal-probe: CHARSEL dump {:08X} (-256..+768 bytes, 8 words a line; *text = points at text)", at);
+      for (int line = -8; line < 24; ++line) {
+        const uint32_t a0 = at + uint32_t(line * 32);
+        std::string txt, notes;
+        for (int k = 0; k < 8; ++k) {
+          uint32_t w = 0;
+          char wb[12];
+          const bool okw = [&] {
+            uint8_t b4[4];
+            if (!skate3::native_scene::GuestTryCopy(b4, base + a0 + 4 * k, 4)) return false;
+            w = (uint32_t(b4[0]) << 24) | (uint32_t(b4[1]) << 16) | (uint32_t(b4[2]) << 8) | b4[3];
+            return true;
+          }();
+          std::snprintf(wb, sizeof(wb), " %08X", okw ? w : 0xDEADDEADu);
+          txt += wb;
+          std::string str;
+          if (okw && in_ranges(w) && read_str(w, &str)) notes += " [+" + std::to_string(4 * k) + " *\"" + str.substr(0, 40) + "\"]";
+        }
+        REXLOG_INFO("portal-probe: CHARSEL   {:+5d} {:08X}:{}{}", line * 32, a0, txt, notes);
+      }
+    }
+  }
   REXLOG_INFO("portal-probe: CHARSEL done in {:.1f} s", std::chrono::duration<float>(std::chrono::steady_clock::now() - t0).count());
 }
 
@@ -1798,8 +1850,8 @@ void StartCharselScan(uint8_t* base) {
     REXLOG_INFO("portal-probe: CHARSEL scan already running");
     return;
   }
-  std::thread([base, names = std::string(REXCVAR_GET(skate3_portal_charsel_names))] {
-    CharselScan(base, names);
+  std::thread([base, names = std::string(REXCVAR_GET(skate3_portal_charsel_names)), dumps = std::string(REXCVAR_GET(skate3_portal_charsel_dump))] {
+    CharselScan(base, names, dumps);
     g_charsel_running = false;
   }).detach();
 }
@@ -1811,15 +1863,86 @@ const bool g_charsel_runner_set = (skate3::portal_chell::SetSelectorProbeRunner(
   return true;
 }), true);
 
+// CROSSCHECK (user: "wall/floor seems a little off"): what kind of pair each crossing used, and 10 and 20 updates later how the motion
+// compares with what the portal promised: speed kept, the heading against the expected exit direction and against the facing given.
+struct CrossCheck {
+  bool active = false;
+  int seq = 0;
+  uint32_t frame0 = 0;
+  char kind[24] = {};
+  float vin[3] = {}, vout[3] = {}, face[2] = {}, lat = 0, vert = 0, gravity = 9.81f;
+  bool done10 = false;
+};
+CrossCheck g_check;
+int g_check_seq = 0;
+const char* SurfaceKind(const float n[3]) { return n[1] > 0.7f ? "floor" : n[1] < -0.7f ? "ceiling" : "wall"; }
+float HeadingDeg(float ax, float az, float bx, float bz) {
+  const float la = std::hypot(ax, az), lb = std::hypot(bx, bz);
+  if (la < 1e-3f || lb < 1e-3f) return -1.0f;
+  return std::acos(std::clamp((ax * bx + az * bz) / (la * lb), -1.0f, 1.0f)) * 57.29578f;
+}
+
+// FPVWALK self-check: on foot in first person with the stick pushed, how far is the walking direction from the direction asked for (the stick
+// read relative to the shown view)? Logged every 5 s with samples. And WALK (spec request R9): which actor / skeleton vectors carry the
+// on-foot velocity, so a portal can keep it (the board's stores do not apply on foot).
+struct WalkCheck {
+  int n = 0;
+  double err_sum = 0;
+  float err_max = 0;
+  int64_t last_log = 0;
+} g_walk_check;
+struct WalkScan {
+  int scans = 0;
+  std::unordered_map<uint32_t, int> actor_hits, skel_hits;  // byte offset -> scans it matched in
+  bool reported = false;
+} g_walk_scan;
+void WalkScanStep(uint8_t* base, uint32_t self, const float v[3]) {
+  if (g_walk_scan.reported) return;
+  const float sp = std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+  if (sp < 1.2f) return;
+  auto scan = [&](uint32_t start, uint32_t bytes, std::unordered_map<uint32_t, int>& hits) {
+    std::vector<uint32_t> raw(bytes / 4);
+    if (start < 0x10000 || !skate3::native_scene::GuestTryCopy(raw.data(), base + start, bytes)) return;
+    for (uint32_t i = 0; i + 3 <= raw.size(); ++i) {
+      const float a[3] = {BeFloat(raw[i]), BeFloat(raw[i + 1]), BeFloat(raw[i + 2])};
+      const float d[3] = {a[0] - v[0], a[1] - v[1], a[2] - v[2]};
+      if (std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]) < std::max(0.4f, 0.15f * sp)) ++hits[i * 4];
+    }
+  };
+  uint32_t skel = 0;
+  ReadBe32(base, self + 1884, &skel);
+  scan(self, 0x800, g_walk_scan.actor_hits);
+  scan(skel, 0x4100, g_walk_scan.skel_hits);
+  if (++g_walk_scan.scans < 30) return;
+  g_walk_scan.reported = true;
+  auto top = [&](const std::unordered_map<uint32_t, int>& hits, const char* what) {
+    std::vector<std::pair<int, uint32_t>> v2;
+    for (const auto& [off, n] : hits)
+      if (n >= 15) v2.push_back({n, off});
+    std::sort(v2.rbegin(), v2.rend());
+    std::string line;
+    for (size_t i = 0; i < v2.size() && i < 10; ++i) {
+      char b[40];
+      std::snprintf(b, sizeof(b), " %s+0x%X %d/%d", what, v2[i].second, v2[i].first, g_walk_scan.scans);
+      line += b;
+    }
+    return line.empty() ? std::string(" none") : line;
+  };
+  REXLOG_INFO("portal-probe: WALK on-foot velocity carriers (vectors within 15% of the walking velocity in 15+ of {} scans): actor{}; skeleton{}",
+              g_walk_scan.scans, top(g_walk_scan.actor_hits, "actor"), top(g_walk_scan.skel_hits, "skeleton"));
+}
+
 float g_last_heading[2] = {0, 0};  // the skater's last horizontal travel direction with real speed (> 1 m/s), for vertical exits
 // FACING: which axis of the skater's presentation matrix is "forward" (learned while riding fast), so a crossing turns the real facing
 // through the pair (entering fakie or at an angle comes out the same way relative to the exit portal), not the travel direction.
 skate3::portal_math::FacingLearner g_facing;
 bool g_facing_logged = false;
+int g_facing_axis = -1;  // locked once learned with agreement >= 0.9 (run 209: the best axis drifted after it was logged)
+float g_facing_sign = 1.0f;
 bool FacingNow(uint8_t* base, float out[3], int* axis_out) {
-  int axis;
-  float sign, agree;
-  if (!g_facing.Best(&axis, &sign, &agree) || agree < 0.9f) return false;
+  if (g_facing_axis < 0) return false;
+  const int axis = g_facing_axis;
+  const float sign = g_facing_sign;
   const uint32_t he = g_human_entity;
   float rows[12];
   if (!he || !skate3::native_entity::CharacterWorldMatrix(base, he, rows)) return false;
@@ -1962,6 +2085,54 @@ bool GateStep(PPCContext& ctx, uint8_t* base, uint32_t self) {
       for (int c = 0; c < 3; ++c) vel3[c] += ((p[c] - last[c]) / dt - vel3[c]) * 0.5f;
       const float hv = std::hypot(vel3[0], vel3[2]);
       if (hv > 1.0f) g_last_heading[0] = vel3[0] / hv, g_last_heading[1] = vel3[2] / hv;
+      {
+        uint32_t wst = 0;
+        ReadBe32(base, self + 1336, &wst);
+        skate3::portal_gate::SetOnFoot(wst == 500);
+        if (wst == 500 && g_track_since_cross > 30) {
+          static int walk_scan_tick = 0;
+          if (walk_scan_tick++ % 10 == 0) WalkScanStep(base, self, vel3);
+          float want[2], mag = 0.0f;
+          if (skate3::portal_gate::WalkIntent(want, &mag) && mag > 0.6f && hv > 1.0f) {
+            const float e = HeadingDeg(vel3[0], vel3[2], want[0], want[1]);
+            if (e >= 0.0f) {
+              g_walk_check.err_sum += e;
+              g_walk_check.err_max = std::max(g_walk_check.err_max, e);
+              ++g_walk_check.n;
+            }
+          }
+          const int64_t now_c = std::chrono::steady_clock::now().time_since_epoch().count();
+          if (g_walk_check.n > 0 && now_c - g_walk_check.last_log > 5'000'000'000ll) {
+            g_walk_check.last_log = now_c;
+            REXLOG_INFO("portal-probe: FPVWALK [f {}] walking {:.0f} deg (mean, max {:.0f}) off the direction you push towards relative to your view, {} "
+                        "samples{}", g_gate_frame, g_walk_check.err_sum / g_walk_check.n, g_walk_check.err_max, g_walk_check.n,
+                        g_walk_check.err_sum / g_walk_check.n > 60.0 ? " - looks mirrored or unmapped" : "");
+            g_walk_check = WalkCheck{};
+            g_walk_check.last_log = now_c;
+          }
+        }
+      }
+      if (g_check.active) {
+        const uint32_t k = g_gate_frame - g_check.frame0;
+        if ((k >= 10 && !g_check.done10) || k >= 20) {
+          const float t = float(k) / 30.0f;
+          const float in_sp = std::sqrt(g_check.vin[0] * g_check.vin[0] + g_check.vin[1] * g_check.vin[1] + g_check.vin[2] * g_check.vin[2]);
+          const float sp = std::sqrt(vel3[0] * vel3[0] + vel3[1] * vel3[1] + vel3[2] * vel3[2]);
+          const float exp_vy = g_check.vout[1] - g_check.gravity * t;
+          const float h_err = HeadingDeg(vel3[0], vel3[2], g_check.vout[0], g_check.vout[2]);
+          const float f_err = HeadingDeg(vel3[0], vel3[2], g_check.face[0], g_check.face[1]);
+          uint32_t st = 0;
+          ReadBe32(base, self + 1336, &st);
+          char he[24], fe[24];
+          std::snprintf(he, sizeof(he), h_err < 0 || hv < 1.0f ? "n/a" : "%.0f deg", h_err);
+          std::snprintf(fe, sizeof(fe), f_err < 0 || hv < 1.0f ? "n/a" : "%.0f deg", f_err);
+          REXLOG_INFO("portal-probe: CROSSCHECK #{} {} +{}: speed {:.1f} of {:.1f} m/s ({:.0f}%), heading off the expected exit by {}, off the facing "
+                      "given by {}, vertical {:.1f} (expected {:.1f}), state {} flags {:08X}", g_check.seq, g_check.kind, k, sp, in_sp,
+                      in_sp > 0.1f ? 100.0f * sp / in_sp : 0.0f, he, fe, vel3[1], exp_vy, st, flags);
+          if (k >= 20) g_check.active = false;
+          g_check.done10 = true;
+        }
+      }
       // learn the facing axis from clean riding (fast, well clear of a crossing)
       if (riding && hv > 3.0f && g_track_since_cross > 60 && g_facing.n < 3000) {
         float rows[12];
@@ -1970,6 +2141,12 @@ bool GateStep(PPCContext& ctx, uint8_t* base, uint32_t self) {
           g_facing.Add(R, g_last_heading);
           int axis;
           float sign, agree;
+          if (g_facing_axis < 0 && g_facing.Best(&axis, &sign, &agree) && agree >= 0.9f) {
+            g_facing_axis = axis;
+            g_facing_sign = sign;
+            REXLOG_INFO("portal-probe: FACING [f {}] locked: forward = entity matrix {} {} ({}), agreement {:.2f} over {} riding samples", g_gate_frame,
+                        axis < 3 ? "column" : "row", axis % 3, sign > 0 ? "+" : "-", agree, g_facing.n);
+          }
           if (!g_facing_logged && g_facing.Best(&axis, &sign, &agree)) {
             g_facing_logged = true;
             REXLOG_INFO("portal-probe: FACING [f {}] learned: forward = entity matrix {} {} ({}), agreement {:.2f} over {} riding samples{}", g_gate_frame,
@@ -2285,9 +2462,20 @@ bool GateStep(PPCContext& ctx, uint8_t* base, uint32_t self) {
   float facing_in[3], facing_out[3];
   int facing_axis = -1;
   bool use_facing = false;
+  const char* facing_why = g_facing_axis >= 0 ? "" : g_facing.n >= 60 ? "agreement under 0.9 (not locked)" : "not learned yet";
   if (FacingNow(base, facing_in, &facing_axis)) {
     Turn(cross.vel, facing_in, facing_out);
     use_facing = std::hypot(facing_out[0], facing_out[2]) > 0.3f;
+    facing_why = use_facing ? "" : "the turned facing is vertical (floor or ceiling exit)";
+  } else if (g_facing_axis >= 0) {
+    facing_why = "your entity matrix is not readable";
+  }
+  if (!use_facing) {
+    int ax = -1;
+    float sg = 0, ag = 0;
+    g_facing.Best(&ax, &sg, &ag);
+    REXLOG_INFO("portal-probe: GATE [f {}] exit facing from the velocity: {} (facing axis {}, agreement {:.2f}, {} samples)", g_gate_frame, facing_why, ax,
+                ag, g_facing.n);
   }
   if (use_facing) {
     // your own facing, turned through the pair (fakie stays fakie, an angled entry stays angled relative to the exit portal)
@@ -2390,6 +2578,24 @@ bool GateStep(PPCContext& ctx, uint8_t* base, uint32_t self) {
   }
   REXLOG_INFO("portal-probe: GATE teleport {}: feet target ({:.2f}, {:.2f}, {:.2f}) heading ({:.2f}, {:.2f})",
               ok ? "armed" : "REFUSED", target[12], target[13], target[14], hx, hz);
+  if (ok) {
+    g_check = CrossCheck{};
+    g_check.active = true;
+    g_check.seq = ++g_check_seq;
+    g_check.frame0 = g_gate_frame;
+    std::snprintf(g_check.kind, sizeof(g_check.kind), "%s->%s", SurfaceKind(cross.entry_n), SurfaceKind(cross.exit_n));
+    std::copy(vin, vin + 3, g_check.vin);
+    std::copy(vout, vout + 3, g_check.vout);
+    g_check.face[0] = hx;
+    g_check.face[1] = hz;
+    g_check.lat = cross.exit_lat;
+    g_check.vert = cross.exit_vert;
+    g_check.gravity = g_air_gravity_n.load() >= 3 ? g_air_gravity.load() : 9.81f;
+    REXLOG_INFO("portal-probe: CROSSCHECK #{} [f {}] {} {}: in ({:.1f}, {:.1f}, {:.1f}) {:.1f} m/s -> out ({:.1f}, {:.1f}, {:.1f}), facing ({:.2f}, "
+                "{:.2f}), came out {:.2f} m across / {:.2f} m up from the exit centre", g_check.seq, g_gate_frame, g_check.kind, riding ? "rolling" : "airborne",
+                vin[0], vin[1], vin[2], std::sqrt(vin[0] * vin[0] + vin[1] * vin[1] + vin[2] * vin[2]), vout[0], vout[1], vout[2], hx, hz,
+                cross.exit_lat, cross.exit_vert);
+  }
   have = false;  // after the jump the old position is meaningless; wait for a riding frame
   return ok;
 }

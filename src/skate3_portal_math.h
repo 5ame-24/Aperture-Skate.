@@ -7,8 +7,14 @@
 namespace skate3::portal_math {
 
 constexpr float kFlatNy = 0.7f;      // |n.y| above this behaves as a floor/ceiling portal
-constexpr float kHalfWidth = 2.6f;   // oval half extents, metres
-constexpr float kHalfHeight = 2.0f;
+// Oval half extents, metres. Set at run time by the gate (skate3_portal_gate_shape / _size, SetPortalSize); the defaults are the "skate"
+// shape (5.2 x 4.0 m, easy to ride through), Portal's own is 1.63 x 2.74 m. Written by the game thread only, when the cvars change.
+inline float kHalfWidth = 2.6f;
+inline float kHalfHeight = 2.0f;
+inline void SetPortalSize(float hw, float hh) {
+  kHalfWidth = hw;
+  kHalfHeight = hh;
+}
 
 // Right-handed frame: r x u = n. n = front normal (the open side), u = "up" in the plane (world up on a wall, the shooter's
 // heading on a floor or ceiling), r = across. `trigger` = metres in front of the plane where a crossing fires.
@@ -98,6 +104,13 @@ struct FacingLearner {
   bool Best(int* axis, float* sign, float* agree) const;
   static void Axis(const float R[9], int axis, float out[3]);  // axis 0..2 = column, 3..5 = row
 };
+
+// ---- First-person walking (FPVWALK): the stick relative to what you see ----
+// The game moves an on-foot skater relative to ITS camera; in portal first person you see another view. Re-express the stick (x right, y
+// forward) so the motion it asks for, read relative to the shown view, is the same motion relative to the game's camera. Both are
+// row-vector views (columns 0 / 2 = right / forward); only their horizontal parts count. world_dir (may be null) = the horizontal world
+// direction asked for (unit, or zero for no input). False (stick unchanged) when either view looks (nearly) straight up or down.
+bool RemapStick(const float game_view[16], const float shown_view[16], float sx, float sy, float* ox, float* oy, float world_dir[2]);
 
 // ---- Camera poses (portal camera carry) ----
 // A camera pose: world position and its axes. Row-vector view matrices (p_view = p_world * V, as the game and the native renderer

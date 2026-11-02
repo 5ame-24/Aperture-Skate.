@@ -512,6 +512,11 @@ void GetCapturedSunDir(float out[3]);
 // drone; the render camera itself is taken over via the ViewCamera::
 // SetViewMatrix override in skate3_native_scene.cpp.
 bool FreecamGuestPose(float out_pos[3]);
+// The game's own main-camera view as it handed it to SetViewMatrix, BEFORE the freecam / portal first-person rewrite (row-vector view, host
+// endianness; columns 0/1/2 = right/up/forward). The gameplay camera the game's on-foot movement is relative to. Any thread.
+bool GameCameraView(float out_view[16]);
+// The view handed to the game while the freecam / portal first person is engaged (what you see). False when not engaged.
+bool ShownCameraView(float out_view[16]);
 
 // True while the guest sits on a loading screen or in the frontend: the
 // presence context is out of gameplay AND the world has stopped publishing

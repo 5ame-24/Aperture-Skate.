@@ -52,7 +52,10 @@ void SetGameFrame(unsigned frame);
 // Gamepad (guest-facing pad state, called every poll). Hold Back = portal mode: RT fires blue, LT fires orange, Y
 // clears both, R3 toggles first person, the right stick looks (in first person). While Back is held those inputs
 // are removed from what the game sees, so a shot never also grabs or flips.
-void FilterPad(uint16_t* buttons, uint8_t* left_trigger, uint8_t* right_trigger, int16_t* rx, int16_t* ry);
+void FilterPad(uint16_t* buttons, uint8_t* left_trigger, uint8_t* right_trigger, int16_t* rx, int16_t* ry, int16_t* lx = nullptr, int16_t* ly = nullptr);
+// FPVWALK: the probe says whether the skater is on foot (state 500); the walking direction the stick asked for last (world, unit; false = none).
+void SetOnFoot(bool on_foot);
+bool WalkIntent(float dir[2], float* magnitude);
 // How far in front of a wall portal's trigger plane the skater comes out (test knob).
 void SetWallClear(float metres);
 // Put portal `which` on a surface: hit point, the surface normal facing the shooter, and the shot direction
@@ -71,6 +74,8 @@ struct Cross {
   float lift;         // metres to raise the feet above the exit point (0 for a ceiling exit)
   float exit_c[3];    // the exit portal's centre and front normal (keeps the feet out of a floor and the head out of a ceiling)
   float exit_n[3];
+  float entry_n[3];   // the entry portal's front normal (CROSSCHECK: which kind of pair)
+  float exit_lat, exit_vert;  // where in the exit oval it came out (across, up; metres from the centre)
 };
 // Game thread, once per frame for the human skater. `pos` is the skater's position. Returns true when `pos`
 // crossed a portal while `allowed` (else the crossing is logged and ignored; `flags` is only for that log).
@@ -101,6 +106,7 @@ void Sfx(int kind);
 // The 3D Portal gun (skate3_portal_gunmodel): where the crosshair is (normalised device coordinates) and how hard the last shot kicked it (0..1).
 bool GunVisible();  // portal gate on and skate3_portal_gun_model
 void AimNdc(float* x, float* y);
+void NoteFizzle(int which);  // a shot placed nothing: the overlay fizzles at the reticle
 float GunKick(int* which);  // `which` = 0 blue, 1 orange
 // Ctrl+8: for 8 s the probe logs the game's world line tests near the skater (what a real grind looks like, to make the companion cube grindable).
 void RequestGrindCapture();

@@ -50,9 +50,29 @@ REXCVAR_DEFINE_DOUBLE(skate3_portal_gate_wall_exit, 0.0, "Skate 3",
                       "turned rates were cancelled one frame later, as if a wall probe saw the wall). 0 = on the plane.")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
+REXCVAR_DEFINE_STRING(skate3_portal_gate_shape, "skate", "Skate 3",
+                      "Portal shape: \"skate\" (5.2 x 4.0 m, wide enough to ride through without aiming) or \"portal\" (Portal's own "
+                      "1.63 x 2.74 m: tall and narrow, fits on most walls). Scaled by skate3_portal_gate_size.")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+REXCVAR_DEFINE_DOUBLE(skate3_portal_gate_size, 1.0, "Skate 3", "Portal size scale (1 = the shape's own size; 0.5 to 2).")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+REXCVAR_DEFINE_DOUBLE(skate3_portal_gate_open_time, 0.25, "Skate 3",
+                      "Seconds a new portal takes to open (it grows from its centre with a small overshoot, as in Portal); 0 = instant.")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
+REXCVAR_DEFINE_BOOL(skate3_portal_fpv_walk, true, "Skate 3",
+                    "Portal-style walking in first person: on foot, the left stick / WASD move relative to where you LOOK (the game moves you "
+                    "relative to its own hidden third-person camera). Riding is unchanged. Log prefix FPVWALK.")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
+REXCVAR_DEFINE_BOOL(skate3_portal_gate_fit_strict, false, "Skate 3",
+                    "Portal's rule: a portal that cannot fit on its surface (the surface is smaller than the portal) is not placed (it fizzles). "
+                    "Off = it stays where it was shot.")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
 REXCVAR_DEFINE_BOOL(skate3_portal_gate_fit, true, "Skate 3",
                     "Portal fitting, as in Portal: a new portal is pushed clear of the other one on the same surface, then nudged (up to "
-                    "4 rounds of 8 rim probe rays, 2 m at most) until its whole oval sits on the surface it was shot at. Log prefix PORTALFIT.")
+                    "6 rounds of 8 rim probe rays, growing steps, 2 m at most) until its whole oval sits on the surface it was shot at. Log prefix PORTALFIT.")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
 REXCVAR_DEFINE_BOOL(skate3_portal_gate_hole, true, "Skate 3",
@@ -131,8 +151,9 @@ namespace skate3::portal_gate {
 namespace {
 
 constexpr float kFlatNy = 0.7f;  // |normal.y| above this (within ~45 degrees of flat) behaves as a floor/ceiling portal
-constexpr float kHalfWidth = 2.6f;  // metres: portals are tall rounded rectangles, easier to hit than rings
-constexpr float kHalfHeight = 2.0f;
+// the portal's size lives in portal_math (one value for the crossing, the hole, the drawing and the fitting); see ApplyPortalSize
+using portal_math::kHalfWidth;
+using portal_math::kHalfHeight;
 constexpr float kWallTrigger = 1.1f;  // metres in front of a wall portal (was 0.8: fast or angled approaches hit the wall first)
 constexpr float kTriggerMargin = 0.5f;  // the crossing test is a little bigger than the drawn rectangle, to count the board's width
 constexpr float kFlatTrigger = 0.95f;  // metres above a floor / below a ceiling portal; also the exit offset of both
@@ -153,6 +174,7 @@ struct Gate {
   // How far in front of the drawn portal the crossing triggers. A wall is solid, so the skater's position
   // never reaches the wall plane (it stops ~0.5 m short); the trigger sits where the skater can actually get.
   float trigger = 0.0f;
+  int64_t placed_ns = 0;  // when it was placed (the opening animation)
   bool Flat() const { return std::abs(n[1]) > kFlatNy; }  // floor, ceiling or gentle slope
 };
 
@@ -652,6 +674,14 @@ void AimNdc(float* x, float* y) {
   }
 }
 
+std::atomic<bool> g_on_foot{false};  // FPVWALK: the skater is on foot (state 500), set by the probe
+std::atomic<int64_t> g_fizzle_ns{0};
+std::atomic<int> g_fizzle_which{0};
+void NoteFizzle(int which) {
+  g_fizzle_which = which;
+  g_fizzle_ns = now_ns();
+}
+
 float GunKick(int* which) {
   *which = g_fire_which;
   const int64_t t = g_fire_ns.load();
@@ -727,9 +757,18 @@ int SurfaceShapes(SurfaceShape out[2]) {
     sh.count = kPoints;
     std::copy(g.c, g.c + 3, sh.centre);
     std::copy(g.n, g.n + 3, sh.normal);
+    // opening: grows from the centre over skate3_portal_gate_open_time with a small overshoot (ease-out-back), as Portal's portals do
+    const float t_open = float(REXCVAR_GET(skate3_portal_gate_open_time));
+    float open = 1.0f;
+    if (t_open > 0.0f && g.placed_ns > 0) {
+      const float x = std::clamp(float(now_ns() - g.placed_ns) * 1e-9f / t_open, 0.0f, 1.0f);
+      const float c1 = 1.70158f, c3 = c1 + 1.0f;
+      open = std::max(0.02f, 1.0f + c3 * (x - 1.0f) * (x - 1.0f) * (x - 1.0f) + c1 * (x - 1.0f) * (x - 1.0f));
+    }
+    const float rim = std::min(kRim, 0.18f * std::min(kHalfWidth, kHalfHeight));  // a Portal-sized portal gets a thinner rim
     for (int layer = 0; layer < 2; ++layer) {
-      const float hw = layer == 0 ? kHalfWidth : kHalfWidth - kRim;
-      const float hh = layer == 0 ? kHalfHeight : kHalfHeight - kRim;
+      const float hw = open * (layer == 0 ? kHalfWidth : kHalfWidth - rim);
+      const float hh = open * (layer == 0 ? kHalfHeight : kHalfHeight - rim);
       const float lift = layer == 0 ? 0.02f : 0.03f;  // keep the core just in front of the rim
       for (int k = 0; k < kPoints; ++k) {
         const float a = 6.2831853f * float(k) / float(kPoints);
@@ -976,6 +1015,8 @@ void SetTravel(float dx, float dz, float speed) {
 
 bool FpvAutoYaw(double* yaw) {
   if (!REXCVAR_GET(skate3_portal_fpv_autocentre)) return false;
+  // on foot with FPVWALK you walk where you look (Portal): turning the view toward the walking direction would chase every strafe
+  if (REXCVAR_GET(skate3_portal_fpv_walk) && g_on_foot.load()) return false;
   const float x = g_travel_x, z = g_travel_z;
   if (g_travel_speed < 1.5f || std::hypot(x, z) < 0.001f) return false;
   if (now_ns() - g_look_ns.load() < 1'200'000'000) return false;  // the player is looking around: leave it
@@ -1011,7 +1052,38 @@ bool FpvHeadPos(float out[3]) {
   return true;
 }
 
-void FilterPad(uint16_t* buttons, uint8_t* left_trigger, uint8_t* right_trigger, int16_t* rx, int16_t* ry) {
+std::atomic<float> g_walk_dir_x{0.0f}, g_walk_dir_z{0.0f}, g_walk_mag{0.0f};
+void SetOnFoot(bool on_foot) { g_on_foot = on_foot; }
+bool WalkIntent(float dir[2], float* magnitude) {
+  *magnitude = g_walk_mag.load();
+  dir[0] = g_walk_dir_x.load();
+  dir[1] = g_walk_dir_z.load();
+  return *magnitude > 0.0f;
+}
+
+// FPVWALK: in portal first person on foot, the walking stick re-expressed relative to the shown view (portal_math::RemapStick).
+static void WalkRemap(int16_t* lx, int16_t* ly) {
+  g_walk_mag = 0.0f;
+  if (!lx || !ly || !REXCVAR_GET(skate3_portal_fpv_walk) || !FpvActive() || !g_on_foot.load()) return;
+  const float sx = float(*lx) / 32767.0f, sy = float(*ly) / 32767.0f;
+  const float mag = std::min(1.0f, std::hypot(sx, sy));
+  if (mag < 0.15f) return;
+  float game[16], shown[16];
+  if (!native_scene::GameCameraView(game) || !native_scene::ShownCameraView(shown)) return;
+  float ox, oy, wd[2];
+  if (!portal_math::RemapStick(game, shown, sx, sy, &ox, &oy, wd)) return;
+  // keep the stick's length (the remap is a rotation, but float noise must never push it past full deflection)
+  const float ol = std::hypot(ox, oy);
+  if (ol > 1e-4f) ox *= mag / ol, oy *= mag / ol;
+  *lx = int16_t(std::clamp(ox * 32767.0f, -32767.0f, 32767.0f));
+  *ly = int16_t(std::clamp(oy * 32767.0f, -32767.0f, 32767.0f));
+  g_walk_dir_x = wd[0];
+  g_walk_dir_z = wd[1];
+  g_walk_mag = mag;
+}
+
+void FilterPad(uint16_t* buttons, uint8_t* left_trigger, uint8_t* right_trigger, int16_t* rx, int16_t* ry, int16_t* lx, int16_t* ly) {
+  WalkRemap(lx, ly);
   constexpr uint16_t kY = 0x8000, kR3 = 0x0080, kX = 0x4000, kR1 = 0x0200, kB = 0x2000;  // XInput button bits
   static bool was_rt = false, was_lt = false, was_y = false, was_r3 = false, was_x = false, was_r1 = false, was_b = false;
   static auto last = std::chrono::steady_clock::now();
@@ -1141,6 +1213,7 @@ bool PlaceOn(int which, const float hit[3], const float normal[3], const float s
   SetFrame(g, n, u);
   for (int k = 0; k < 3; ++k) g.c[k] = hit[k] + n[k] * 0.05f;
   g.trigger = trigger;
+  g.placed_ns = now_ns();
   g_have_prev = false;
   if (REXCVAR_GET(skate3_portal_gate_fit)) {
     // never on top of the other portal: pushed just clear of it along the surface (Portal moves a new portal off the old one)
@@ -1201,6 +1274,22 @@ void FitResult(int which, uint32_t gen, const bool hit[], const float pos[][3], 
     bad += !ok[k];
     pattern[k] = ok[k] ? 'o' : (hit[k] ? 'x' : '-');  // o on the surface, x hit something else, - nothing within reach
   }
+  // why each failed rim point failed (run 209: 6 "best effort" and 2 "does not fit" with no detail)
+  std::string why;
+  static const char* kSide[portal_math::kRimProbes] = {"right", "upper right", "top", "upper left", "left", "lower left", "bottom", "lower right"};
+  for (int k = 0; k < portal_math::kRimProbes; ++k) {
+    if (ok[k]) continue;
+    char b[96];
+    if (!hit[k]) {
+      std::snprintf(b, sizeof(b), "%s%s: nothing within %.1f m", why.empty() ? "" : "; ", kSide[k], rules.probe_len);
+    } else {
+      const float rel[3] = {pos[k][0] - g.c[0], pos[k][1] - g.c[1], pos[k][2] - g.c[2]};
+      std::snprintf(b, sizeof(b), "%s%s: hit %.2f m %s the plane, facing %.2f", why.empty() ? "" : "; ", kSide[k], std::abs(Dot3(rel, g.n)),
+                    Dot3(rel, g.n) > 0 ? "in front of" : "behind", Dot3(nrm[k], g.n));
+    }
+    why += b;
+  }
+  const char* surface = g.Flat() ? (g.n[1] > 0 ? "floor" : "ceiling") : "wall";
   float sh[2];
   const int st = portal_math::FitShift(ok, rules, sh);
   const char* name = which ? "orange" : "blue";
@@ -1209,18 +1298,29 @@ void FitResult(int which, uint32_t gen, const bool hit[], const float pos[][3], 
     f.want = false;
     return;
   }
-  if (st == 2 || f.round + 1 >= 4 || f.moved + rules.step > rules.max_total + 1e-3f) {
-    REXLOG_INFO("portal-gate: PORTALFIT {} {}: {} of {} rim points off the surface [{}] (kept where it is, moved {:.2f} m)", name,
-                st == 2 ? "does not fit (the surface is smaller than the portal)" : "best effort", bad, portal_math::kRimProbes, pattern, f.moved);
+  // steps grow each round (0.35, 0.49, 0.63, ... m): a portal shot low on a wall needs more than 1 m (run 209 "best effort" with 1 point off)
+  const float grow = 1.0f + 0.4f * float(f.round);
+  if (st == 2 || f.round + 1 >= 6 || f.moved + rules.step * grow > rules.max_total + 1e-3f) {
+    REXLOG_INFO("portal-gate: PORTALFIT {} {}: {} of {} rim points off the {} [{}] (kept where it is, moved {:.2f} m) - {} (portal {:.1f} x {:.1f} m)", name,
+                st == 2 ? "does not fit (the surface is smaller than the portal)" : "best effort", bad, portal_math::kRimProbes, surface, pattern, f.moved,
+                why, 2 * kHalfWidth, 2 * kHalfHeight);
     f.want = false;
+    if (st == 2 && REXCVAR_GET(skate3_portal_gate_fit_strict)) {
+      g.active = false;
+      g_both_placed = false;
+      g_have_prev = false;
+      NoteFizzle(which);
+      REXLOG_INFO("portal-gate: PORTALFIT {} removed (skate3_portal_gate_fit_strict): it does not fit there", name);
+    }
     return;
   }
-  for (int k = 0; k < 3; ++k) g.c[k] += sh[0] * g.r[k] + sh[1] * g.u[k];
-  f.moved += rules.step;
+  for (int k = 0; k < 3; ++k) g.c[k] += (sh[0] * g.r[k] + sh[1] * g.u[k]) * grow;
+  f.moved += rules.step * grow;
   ++f.round;
   f.sent = false;  // probe again from the new place
   g_have_prev = false;
-  REXLOG_INFO("portal-gate: PORTALFIT {} round {}: [{}] {} off, nudged ({:+.2f} across, {:+.2f} up)", name, f.round, pattern, bad, sh[0], sh[1]);
+  REXLOG_INFO("portal-gate: PORTALFIT {} round {}: [{}] {} off ({}), nudged ({:+.2f} across, {:+.2f} up)", name, f.round, pattern, bad, why, sh[0] * grow,
+              sh[1] * grow);
 }
 
 void PlaceAhead(int which, const float skater[3]) {
@@ -1238,6 +1338,7 @@ void PlaceAhead(int which, const float skater[3]) {
   const float up[3] = {0, 1, 0};
   SetFrame(g, n, up);
   g.trigger = 0.0f;
+  g.placed_ns = now_ns();
   g.c[0] = skater[0] + fx * kAhead;
   g.c[1] = skater[1] - kEntityAboveGround + kHalfHeight;
   g.c[2] = skater[2] + fz * kAhead;
@@ -1246,7 +1347,20 @@ void PlaceAhead(int which, const float skater[3]) {
               which ? "orange" : "blue", kAhead, g.c[0], g.c[1], g.c[2]);
 }
 
+// skate3_portal_gate_shape / _size -> the one portal size (portal_math), checked once a frame on the game thread.
+void ApplyPortalSize() {
+  const std::string shape = REXCVAR_GET(skate3_portal_gate_shape);
+  const bool portal = shape == "portal";
+  const float scale = std::clamp(float(REXCVAR_GET(skate3_portal_gate_size)), 0.5f, 2.0f);
+  const float hw = (portal ? 0.815f : 2.6f) * scale, hh = (portal ? 1.37f : 2.0f) * scale;
+  if (hw != kHalfWidth || hh != kHalfHeight) {
+    portal_math::SetPortalSize(hw, hh);
+    REXLOG_INFO("portal-gate: portal size now {:.2f} x {:.2f} m ({} shape, scale {:.2f})", 2 * hw, 2 * hh, portal ? "portal" : "skate", scale);
+  }
+}
+
 bool Step(const float pos[3], bool allowed, unsigned flags, Cross* out) {
+  ApplyPortalSize();
   std::lock_guard<std::mutex> lock(g_mutex);
   std::copy(pos, pos + 3, g_tracked);
   g_tracked_valid = true;
@@ -1328,6 +1442,9 @@ bool Step(const float pos[3], bool allowed, unsigned flags, Cross* out) {
       out->lift = (hole || to.n[1] < -0.5f) ? 0.0f : 1.0f;  // a ceiling exit starts at head height, not lifted
       std::copy(to.c, to.c + 3, out->exit_c);
       std::copy(to.n, to.n + 3, out->exit_n);
+      std::copy(g.n, g.n + 3, out->entry_n);
+      out->exit_lat = -lat;
+      out->exit_vert = vert;
       crossed = true;
       Sfx(2);
       REXLOG_INFO("portal-gate: crossed {} portal at ({:.2f}, {:.2f}, {:.2f}) -> ({:.2f}, {:.2f}, {:.2f}){}",
@@ -1511,7 +1628,7 @@ void Overlay::OnDraw(ImGuiIO& io) {
     const Gate& g = gates[i];
     // rounded rectangle in the portal plane: u across (g.r), v along g.u
     constexpr int kArc = 6;
-    constexpr float kCorner = 0.7f;
+    const float kCorner = std::min(0.7f, 0.4f * std::min(kHalfWidth, kHalfHeight));  // (a Portal-sized portal is narrow)
     constexpr int kSeg = 4 * (kArc + 1);
     ImVec2 pts[kSeg];
     int n = 0;
@@ -1610,6 +1727,23 @@ void Overlay::OnDraw(ImGuiIO& io) {
     if (gates[0].active) dl->AddCircleFilled(ImVec2(m.x - r * 0.45f, m.y), r * 0.22f, colors[0]);
     if (gates[1].active) dl->AddCircleFilled(ImVec2(m.x + r * 0.45f, m.y), r * 0.22f, colors[1]);
     dl->AddCircleFilled(m, 2.0f, white);
+    {
+      // a shot that placed nothing fizzles at the reticle (an expanding ring in the portal's colour, 0.35 s), as in Portal
+      const int64_t fz = g_fizzle_ns.load();
+      const float age = fz ? float(now_ns() - fz) * 1e-9f : 1e9f;
+      if (age < 0.35f) {
+        const float k = age / 0.35f;
+        const ImU32 c = colors[g_fizzle_which.load() ? 1 : 0];
+        const int alpha = int(220.0f * (1.0f - k));
+        dl->AddCircle(m, r * (1.2f + 2.5f * k), (c & 0x00FFFFFF) | (ImU32(alpha) << IM_COL32_A_SHIFT), 24, 3.0f);
+        for (int sp = 0; sp < 6; ++sp) {  // sparks
+          const float a = 1.0472f * float(sp) + 0.3f;
+          const float r0 = r * (1.0f + 2.0f * k), r1 = r0 + r * 0.8f;
+          dl->AddLine(ImVec2(m.x + std::cos(a) * r0, m.y + std::sin(a) * r0), ImVec2(m.x + std::cos(a) * r1, m.y + std::sin(a) * r1),
+                      (c & 0x00FFFFFF) | (ImU32(alpha) << IM_COL32_A_SHIFT), 2.0f);
+        }
+      }
+    }
 
     if (REXCVAR_GET(skate3_portal_gun_2d) || !GunVisible()) {
     const ImVec2 hand(x0 + w * 0.86f, y0 + h * 0.97f);
