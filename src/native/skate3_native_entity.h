@@ -164,6 +164,7 @@ bool SkaterWorldPosNear(uint8_t* base, const float hint[3], float max_dist, floa
 struct CharacterEntity {
   uint32_t entity = 0;
   bool skater = false;  // false = LivingWorld
+  bool rider = false;   // exactly Sk8::SkaterPresEntity (kSkater), not a colorized / CAC / aux variant
   float pos[3] = {};
 };
 int CharacterEntities(uint8_t* base, CharacterEntity* out, int max);

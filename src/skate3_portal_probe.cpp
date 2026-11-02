@@ -954,10 +954,17 @@ void AirFinish(const char* why) {
   namespace pm = skate3::portal_math;
   std::vector<AirSample> s;
   s.swap(g_air.s);
-  // drop the take-off and landing frames (contacts still or already acting)
-  if (s.size() < 19) return;
-  s.erase(s.begin(), s.begin() + 2);
-  s.resize(s.size() - 2);
+  // drop the take-off and landing frames (contacts still or already acting). Run 194: no arc logged at all - an ollie is ~0.4-0.6 s, i.e.
+  // 12-18 updates at 30/s, and the old minimum of 19 dropped them silently. Now 1 frame each end and 8 left; short arcs are logged.
+  static int rejected_logged = 0;
+  if (s.size() < 10) {
+    if (s.size() >= 4 && rejected_logged++ < 30) {
+      REXLOG_INFO("portal-probe: AIR arc too short ({}): {} samples over {:.2f} s, need 10", why, s.size(), s.back().t - s.front().t);
+    }
+    return;
+  }
+  s.erase(s.begin());
+  s.pop_back();
   const int n = int(s.size());
   std::vector<float> t(n), y(n);
   for (int i = 0; i < n; ++i) {
@@ -1013,7 +1020,7 @@ void AirFinish(const char* why) {
   ++g_air_arcs;
   const float y_range = *std::max_element(y.begin(), y.end()) - *std::min_element(y.begin(), y.end());
   // State 200 also flickers on rough ground: a real arc rises or falls at least 25 cm.
-  const bool accept = r2 > 0.98f && n >= 15 && g_pos > 3.0f && g_pos < 40.0f && y_range > 0.25f;
+  const bool accept = r2 > 0.98f && n >= 8 && g_pos > 3.0f && g_pos < 40.0f && y_range > 0.25f;
   if (accept && !scores.empty()) {
     const float limit = std::max(1.0f, 1.5f * scores[0].rms);
     uint32_t mask = 0;
@@ -1042,7 +1049,9 @@ void AirFinish(const char* why) {
   }
   if (g_air_arcs > 60) return;
   REXLOG_INFO("portal-probe: AIR arc #{} ({}): {:.2f} s, {} samples, start speed {:.1f} m/s; gravity from the path {:.2f} m/s^2 (r2 {:.4f}){}",
-              g_air_arcs, why, t.back() - t.front(), n, sp0, g_pos, r2, accept ? "" : " - not used (fit too poor, too short or out of range)");
+              g_air_arcs, why, t.back() - t.front(), n, sp0, g_pos, r2,
+              accept ? "" : r2 <= 0.98f ? " - not used: fit too poor (r2 <= 0.98)" : y_range <= 0.25f ? " - not used: rose/fell less than 0.25 m"
+                          : " - not used: gravity outside 3..40");
   char line[600];
   int len = 0;
   for (size_t i = 0; i < scores.size() && i < 5; ++i) {
@@ -1061,12 +1070,45 @@ void AirFinish(const char* why) {
   }
 }
 
+// (state, flags top byte) histogram of every not-riding human update, one line per 15 s (AIR): which state an on-foot jump is. Called at the
+// top of GateStep so it also counts updates in which tracking failed.
+void AirStateHistogram(uint8_t* base, uint32_t self, uint32_t flags) {
+  if (!REXCVAR_GET(skate3_portal_airprobe)) return;
+  const int64_t now = std::chrono::steady_clock::now().time_since_epoch().count();
+  uint32_t state = 0;
+  ReadBe32(base, self + 1336, &state);
+  const uint32_t top = flags & 0xF0000000u;
+  static std::unordered_map<uint64_t, int> hist;
+  static int64_t hist_t0 = 0;
+  if (top != 0xC0000000u) ++hist[(uint64_t(state) << 8) | (flags >> 24)];
+  if (!hist_t0) hist_t0 = now;
+  if (now - hist_t0 > 15'000'000'000ll && !hist.empty()) {
+    std::vector<std::pair<int, uint64_t>> v;
+    for (const auto& [k, c] : hist) v.push_back({c, k});
+    std::sort(v.rbegin(), v.rend());
+    char line[400];
+    int len = 0;
+    for (size_t i = 0; i < v.size() && i < 10; ++i) {
+      len += std::snprintf(line + len, sizeof(line) - len, "%sstate %u flags %02X..: %d", i ? ", " : "", unsigned(v[i].second >> 8),
+                           unsigned(v[i].second & 0xFF), v[i].first);
+    }
+    static int hist_logged = 0;
+    if (hist_logged++ < 20) REXLOG_INFO("portal-probe: AIR off-board updates in the last 15 s by state/flags: {}", line);
+    hist.clear();
+    hist_t0 = now;
+  }
+}
+
 void AirProbe(uint8_t* base, uint32_t self, const float p[3], uint32_t flags) {
   if (!REXCVAR_GET(skate3_portal_airprobe)) return;
   const int64_t now = std::chrono::steady_clock::now().time_since_epoch().count();
   uint32_t state = 0;
   ReadBe32(base, self + 1336, &state);
-  const bool air = (flags & 0xF0000000u) != 0xC0000000u && state == 200 && !(flags & 0x40000000u);
+  // Airborne = state 200 (riding air) or airborne flags (top nibble 8 or 9, run notes: 8E/90000000), never recovering or teleporting.
+  // On-foot jumps may use another state: the histogram below logs which states/flags occur off the board.
+  const uint32_t top = flags & 0xF0000000u;
+  const bool air = top != 0xC0000000u && (state == 200 || top == 0x80000000u || top == 0x90000000u) && !(flags & 0x40000000u) &&
+                   state != 700 && state != 702;
   const bool clean = air && g_fling.left == 0 && now - g_last_cross_ns > 1'000'000'000ll;
   AirArc& arc = g_air;
   if (!arc.s.empty()) {
@@ -1185,24 +1227,65 @@ void FunnelStep(uint8_t* base, uint32_t self, const float p[3], const float v[3]
 }
 
 // Publish the other characters (NPC skaters, pedestrians) for the hole and the prop code, and remember which entity is the human's.
-void PublishCharacters(uint8_t* base, const float human[3]) {
+// The human's entity LOCK (used by the FPVTRACK re-acquire). Run 194: it was re-picked every frame as "the nearest skater entity within 1.5 m
+// of the tracked point", so one wrong pick followed itself 50-160 m across the map. Now it is only chosen from RIDING frames (the actor's
+// ground position is authoritative there), must win 30 riding frames in a row, prefers the rider class (SkaterPresEntity), never changes
+// off the board, and is dropped when it jumps > 5 m in one frame while the skater did not (a pooled / reused entity).
+uint32_t g_lock_pending = 0;
+int g_lock_frames = 0, g_lock_unstable = 0;
+float g_lock_last[3] = {};
+bool g_lock_have_last = false;
+
+void PublishCharacters(uint8_t* base, const float human[3], bool riding, float human_step) {
   skate3::native_entity::CharacterEntity ents[48];
   const int n = skate3::native_entity::CharacterEntities(base, ents, 48);
   int human_i = -1;
   float best = 1.5f;
+  bool best_rider = false;
   for (int i = 0; i < n; ++i) {
     if (!ents[i].skater) continue;
     const float d = std::hypot(ents[i].pos[0] - human[0], std::hypot(ents[i].pos[1] - human[1], ents[i].pos[2] - human[2]));
-    if (d < best) {
+    // a rider-class entity within range beats any other class; otherwise the nearest
+    if (d < 1.5f && ((ents[i].rider && !best_rider) || (ents[i].rider == best_rider && d < best))) {
       best = d;
+      best_rider = ents[i].rider;
       human_i = i;
     }
   }
-  if (human_i >= 0) g_human_entity = ents[human_i].entity;
+  const uint32_t locked = g_human_entity;
+  if (riding && human_i >= 0) {
+    const uint32_t cand = ents[human_i].entity;
+    g_lock_frames = cand == g_lock_pending ? g_lock_frames + 1 : 1;
+    g_lock_pending = cand;
+    if (g_lock_frames >= 30 && cand != locked) {
+      g_human_entity = cand;
+      g_lock_have_last = false;
+      g_lock_unstable = 0;
+      REXLOG_INFO("portal-probe: FPVTRACK human entity locked: {:08X} ({}, {:.2f} m from the riding position for 30 frames){}", cand,
+                  best_rider ? "rider class" : "other skater class", best, locked ? " (replaces the previous lock)" : "");
+    }
+  }
+  // stability of the locked entity: a real rider never jumps > 5 m in one frame unless the skater did
+  if (const uint32_t he = g_human_entity) {
+    float q[3];
+    if (skate3::native_entity::CharacterWorldPos(base, he, q)) {
+      if (g_lock_have_last) {
+        const float jump = std::hypot(q[0] - g_lock_last[0], std::hypot(q[1] - g_lock_last[1], q[2] - g_lock_last[2]));
+        if (jump > 5.0f && human_step < 1.0f && ++g_lock_unstable >= 3) {
+          REXLOG_INFO("portal-probe: FPVTRACK human entity {:08X} unlocked: it jumped {:.1f} m in one frame while the skater moved {:.2f} m",
+                      he, jump, human_step);
+          g_human_entity = 0;
+          g_lock_frames = 0;
+        }
+      }
+      std::copy(q, q + 3, g_lock_last);
+      g_lock_have_last = true;
+    }
+  }
   float pos[48][3];
   int m = 0;
   for (int i = 0; i < n; ++i) {
-    if (i == human_i) continue;
+    if (i == human_i || ents[i].entity == g_human_entity) continue;
     std::copy(ents[i].pos, ents[i].pos + 3, pos[m++]);
   }
   // skate3_portal_props_characters = the old behaviour: publish nobody, so characters' bodies are treated as props again.
@@ -1235,6 +1318,7 @@ bool GateStep(PPCContext& ctx, uint8_t* base, uint32_t self) {
   }
   const float ground[3] = {std::bit_cast<float>(w[0]), std::bit_cast<float>(w[1]), std::bit_cast<float>(w[2])};
   const bool riding = (flags & 0xF0000000) == 0xC0000000;
+  AirStateHistogram(base, self, flags);
   if (InPit(ground[0], ground[2])) {
     have = false;  // career pit
     return false;
@@ -1246,7 +1330,8 @@ bool GateStep(PPCContext& ctx, uint8_t* base, uint32_t self) {
     if (have && skate3::native_entity::SkaterWorldPosNear(base, tracked, 4.0f, head)) skate3::portal_gate::SetHead(head);
   }
   GunStep(have ? tracked : place_pos);
-  PublishCharacters(base, have ? tracked : place_pos);
+  PublishCharacters(base, riding ? place_pos : (have ? tracked : place_pos), riding,
+                    have ? std::hypot(place_pos[0] - last[0], place_pos[2] - last[2]) : 0.0f);
   float p[3];
   if (riding) {
     // The actor's ground position is current while riding. The entity helper latched onto other skaters after
@@ -1257,17 +1342,31 @@ bool GateStep(PPCContext& ctx, uint8_t* base, uint32_t self) {
     // foot: the tracked point and the first-person head froze and the camera stayed behind while the skater walked on (R8). Re-acquire
     // through the human's own presentation entity; within 30 frames of a crossing only near its exit, so a stale entity position at the
     // entry cannot start a second crossing.
+    // Run 194: this fired on every miss ("after 0 lost frames") and followed a wrong entity across the map. Now only after 5 misses in a
+    // row, only with a LOCKED entity (PublishCharacters), and only at a plausible place: near the exit right after a crossing, otherwise
+    // within 3 m + 20 m/s x the time lost of the last good position.
+    ++g_track_lost;
     float q[3];
     const uint32_t he = g_human_entity;
-    bool ok = he && skate3::native_entity::CharacterWorldPos(base, he, q);
-    if (ok && g_track_since_cross < 30) {
-      ok = std::hypot(q[0] - g_track_exit[0], std::hypot(q[1] - g_track_exit[1], q[2] - g_track_exit[2])) < 3.0f;
+    bool ok = g_track_lost >= 5 && he && skate3::native_entity::CharacterWorldPos(base, he, q);
+    const char* why = g_track_lost < 5 ? "waiting" : !he ? "no locked entity" : !ok ? "locked entity not readable" : nullptr;
+    if (ok) {
+      const float from[3] = {g_track_since_cross < 30 ? g_track_exit[0] : tracked[0], g_track_since_cross < 30 ? g_track_exit[1] : tracked[1],
+                             g_track_since_cross < 30 ? g_track_exit[2] : tracked[2]};
+      const float limit = g_track_since_cross < 30 ? 3.0f : 3.0f + 20.0f * float(g_track_lost) / 60.0f;
+      const float d = std::hypot(q[0] - from[0], std::hypot(q[1] - from[1], q[2] - from[2]));
+      if (d > limit) {
+        ok = false;
+        why = "entity too far from where the skater was";
+        static int logged_far = 0;
+        if (logged_far++ < 20) {
+          REXLOG_INFO("portal-probe: FPVTRACK refused a re-acquire: entity {:08X} at ({:.2f}, {:.2f}, {:.2f}) is {:.1f} m from the last good "
+                      "position (limit {:.1f} m, {} lost frames)", he, q[0], q[1], q[2], d, limit, g_track_lost);
+        }
+      }
     }
     if (!ok) {
-      if (++g_track_lost == 30) {
-        REXLOG_INFO("portal-probe: FPVTRACK lost the skater for 30 frames (not riding, entity {:08X} {})", he,
-                    he ? "not usable or not near the exit yet" : "unknown");
-      }
+      if (g_track_lost == 30) REXLOG_INFO("portal-probe: FPVTRACK lost the skater for 30 frames (not riding; {})", why ? why : "?");
       return false;
     }
     std::copy(q, q + 3, p);
@@ -1279,6 +1378,26 @@ bool GateStep(PPCContext& ctx, uint8_t* base, uint32_t self) {
     g_track_lost = 0;
   } else {
     g_track_lost = 0;
+  }
+  // Jump guard: the tracked point feeds the crossing test, the hole and the gun. A jump of > 5 m in one update without a crossing is a
+  // tracking error (run 194: 50-160 m jumps = warp and flicker), except a real relocation while riding (session marker), accepted once it
+  // has held for 10 updates.
+  {
+    static int jump_frames = 0;
+    const float jump = have ? std::hypot(p[0] - last[0], std::hypot(p[1] - last[1], p[2] - last[2])) : 0.0f;
+    if (jump > 5.0f) {
+      ++jump_frames;
+      static int logged_jump = 0;
+      if (!riding || jump_frames < 10) {
+        if (logged_jump++ < 20) {
+          REXLOG_INFO("portal-probe: FPVTRACK ignored a {:.1f} m jump of the tracked point ({}, flags {:08X})", jump, riding ? "riding" : "not riding",
+                      flags);
+        }
+        return false;
+      }
+      REXLOG_INFO("portal-probe: FPVTRACK accepted a {:.1f} m relocation after {} riding frames", jump, jump_frames);
+    }
+    jump_frames = 0;
   }
   std::copy(p, p + 3, tracked);
   // Speed of the tracked position, logged for ~48 frames after a crossing.
@@ -1541,7 +1660,12 @@ bool GateStep(PPCContext& ctx, uint8_t* base, uint32_t self) {
   const float target[16] = {hz, 0, -hx, 0, 0, 1, 0, 0, hx, 0, hz, 0, cross.exit_pos[0], feet_y, cross.exit_pos[2], 1};
   const bool ok = ArmTeleport(base, sp, self, flags, target);
   if (ok) g_last_cross_ns = std::chrono::steady_clock::now().time_since_epoch().count();
-  if (ok && REXCVAR_GET(skate3_portal_fling)) {
+  // Run 194: the only armed fling was an on-foot crossing (v_in -2.8, -0.1, -1.4 = walking pace) and stopped at +1 "bailed" (state 500).
+  // Off the board the board is not under the skater: topping up its rates would launch the loose board, not the player. The on-foot
+  // velocity store is unknown (AIR's state histogram and spec request R9), so no FLING there.
+  if (ok && REXCVAR_GET(skate3_portal_fling) && state_at_cross == 500) {
+    REXLOG_INFO("portal-probe: FLING not armed: crossing off the board (state 500, on foot or bailed)");
+  } else if (ok && REXCVAR_GET(skate3_portal_fling)) {
     float vo[3];
     Turn(cross.vel, vel3, vo);
     const float sp_out = std::sqrt(vo[0] * vo[0] + vo[1] * vo[1] + vo[2] * vo[2]);

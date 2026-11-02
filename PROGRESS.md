@@ -624,4 +624,20 @@ Actor offsets: +1200/+1216 ground pos, +1232 delta, +1248 velocity, +1296 flags,
       portal: H m up, predicted landing D m off centre`, `FUNNEL done (why): N frames ...`.
     - Camera righting in the carry (`skate3_portal_camcarry`): the carried camera's roll eases back to upright with `portal_math::RightRoll`
       (tested: 90 deg rights in 0.25-1 s). Logs `PCAM righting a N deg roll after the exit`, `PCAM upright after T ms`.
+59. Run 194 feedback (docs/handoff-feedback-4.md) -> fixes (built, untested). Portal 2 facts (TEST A of HANDOFF 4): 106 maps, 185 catapults
+    (playerSpeed median 650 u = 16.5 m/s), 21 prop_portal at the default 32 x 54 u, no portal/gravity cvars set in configs.
+    - Warp/flicker = FPVTRACK (section 57), not FLING (FLING stopped at +1 and wrote nothing). The re-acquire ran on every tracking miss
+      ("after 0 lost frames") using `g_human_entity`, which PublishCharacters re-picked every frame as the nearest skater entity within 1.5 m of
+      the TRACKED point: one wrong pick followed itself 50-160 m across the map, and those jumps fed the crossing test and the hole.
+      Fixes: (a) the human entity is LOCKED only from riding frames (actor ground position authoritative), same candidate for 30 riding frames,
+      rider class (SkaterPresEntity) preferred, never changed off the board, unlocked if it jumps > 5 m in a frame while the skater did not;
+      (b) re-acquire only after 5 misses in a row, with a lock, and within 3 m of the exit (< 30 frames after a crossing) or 3 m + 20 m/s x
+      time lost of the last good position; (c) a jump guard: a tracked point that moves > 5 m in one update without a crossing is ignored
+      (riding relocations accepted after 10 updates). Logs: `FPVTRACK human entity locked / unlocked`, `FPVTRACK refused a re-acquire`,
+      `FPVTRACK ignored a N m jump`, `FPVTRACK accepted a N m relocation`.
+    - No AIR arcs: arcs under 19 updates were dropped silently (an ollie is 12-18 updates at 30/s). Now 1 frame trimmed per end, 8 needed,
+      `AIR arc too short` logged; airborne also accepted by flags (top nibble 8/9) besides state 200; `AIR off-board updates in the last 15 s
+      by state/flags` (histogram, counted even when tracking fails) to learn what an on-foot jump is.
+    - FLING bailed at +1: it was an on-foot crossing (state 500, walking-pace v_in); FLING now does not arm off the board
+      (`FLING not armed: crossing off the board`). On-foot velocity: spec request R9.
 

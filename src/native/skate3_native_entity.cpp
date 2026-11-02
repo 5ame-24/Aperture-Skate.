@@ -558,6 +558,7 @@ int CharacterEntities(uint8_t* base, CharacterEntity* out, int max) {
     if (!EntityTranslation(base, entity, c.pos)) continue;
     c.entity = entity;
     c.skater = cls != EntClass::kLivingWorld;
+    c.rider = cls == EntClass::kSkater;
     ++n;
   }
   return n;
