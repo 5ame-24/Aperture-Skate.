@@ -406,8 +406,9 @@ bool GelBounce(const GelPatch& g, const float v[3], bool grounded, const GelRule
   } else {
     return false;
   }
+  if (rules.max_bounce > 0.0f) out_n = std::min(out_n, std::max(rules.max_bounce, floor ? rules.min_bounce : rules.wall_min));
   for (int k = 0; k < 3; ++k) out[k] = v[k] - vn * g.n[k] + out_n * g.n[k];
-  if (!floor && g.n[1] > -kFlatNy) out[1] = std::max(out[1], rules.wall_up);  // a wall bounce is also a wall jump
+  if (!floor && !grounded && g.n[1] > -kFlatNy) out[1] = std::max(out[1], rules.wall_up);  // an airborne wall bounce is also a wall jump
   return true;
 }
 
@@ -422,7 +423,7 @@ bool GelOverlaps(const GelPatch& a, const GelPatch& b) {
   const float h = Dot(d, a.n);
   if (std::abs(h) > 0.3f) return false;
   const float in[3] = {d[0] - h * a.n[0], d[1] - h * a.n[1], d[2] - h * a.n[2]};
-  const float reach = 0.75f * (a.radius + b.radius);
+  const float reach = 0.25f * (a.radius + b.radius);
   return Dot(in, in) < reach * reach;
 }
 

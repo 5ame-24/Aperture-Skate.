@@ -31,6 +31,7 @@ struct Effect {
   float v_out[3] = {};  // kBounce: the new velocity (hold it with FLING)
   float dv[3] = {};     // kBounce: v_out - v; kBoost: the velocity to add this update
   int patch = -1;
+  bool lift = false;     // kBounce while grounded: needs a lift off the ground to stick
 };
 Effect HumanStep(const float feet[3], const float centre[3], const float v[3], bool grounded, float dt, float gravity, uint32_t frame);
 

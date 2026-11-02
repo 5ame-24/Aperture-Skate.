@@ -131,8 +131,11 @@ struct GelRules {  // defaults from Portal 2's published cvar defaults (spec 002
   float restitution = 1.0f;    // repulsion: the speed into the surface comes back out times this (bounce_reflect_restitution 1.0)
   float min_bounce = 9.25f;    // m/s out of a floor patch at least: set from a launch height (bounce_paint_min_speed 500 u/s under
                                // sv_gravity 600 = 5.3 m) and the skater's gravity; 9.25 = 5.3 m at 8.07 m/s^2
+  float max_bounce = 0.0f;     // m/s out of any patch at most (0 = no cap): keeps a bounce near the target height (ours, run 197: a drop onto
+                               // the paint went higher than wanted)
   float wall_min = 3.0f;       // m/s out of a wall or ceiling patch at least (ours)
-  float wall_up = 7.0f;        // m/s upward at least after a wall bounce (bounce_paint_wall_jump_upward_speed 275 u/s)
+  float wall_up = 7.0f;        // m/s upward at least after an AIRBORNE wall bounce (bounce_paint_wall_jump_upward_speed 275 u/s); a grounded
+                               // one has none (trampoline_bounce_off_walls_while_on_ground 0: Portal does not wall-jump you off the ground)
   float min_into = 0.5f;       // m/s into the surface needed to count as hitting it (except rolling onto a floor patch; ours)
   float boost_accel = 12.7f;   // propulsion: m/s^2 along the travel direction (sv_speed_paint_acceleration 500 u/s^2) ...
   float boost_cap = 20.3f;     // ... up to this speed (sv_speed_paint_max 800 u/s)
@@ -141,12 +144,14 @@ struct GelRules {  // defaults from Portal 2's published cvar defaults (spec 002
 // Inside the disc (in-plane distance <= radius) and within [-touch_below, touch_above] of its plane; `height` = signed distance in front.
 bool GelTouch(const GelPatch& g, const float p[3], const GelRules& rules, float* height);
 // Repulsion: the velocity after touching patch g with velocity v. Moving into it: the normal part flips, times restitution, and is at least
-// min_bounce (floor) or wall_min (wall/ceiling); the in-plane part is kept; off a wall the upward part is at least wall_up. On a floor patch while grounded and not already rising at half
+// min_bounce (floor) or wall_min (wall/ceiling), and at most max_bounce; the in-plane part is kept; off a wall while airborne the upward part
+// is at least wall_up. On a floor patch while grounded and not already rising at half
 // of min_bounce: the normal part becomes min_bounce. Otherwise (moving away, or along a wall) false.
 bool GelBounce(const GelPatch& g, const float v[3], bool grounded, const GelRules& rules, float out[3]);
 // Propulsion: the speed after dt on an orange patch (never slower than `speed`).
 float GelBoost(float speed, float dt, const GelRules& rules);
-// Same surface (normals within ~25 degrees, planes within 0.3 m) and the discs overlap by more than a quarter of their radii.
+// Same surface (normals within ~25 degrees, planes within 0.3 m) and nearly the same spot (centres closer than a quarter of the two radii):
+// painting there again replaces the old splat; paint next to it does not (run 197: neighbouring splats vanished).
 bool GelOverlaps(const GelPatch& a, const GelPatch& b);
 // Paints `p` over the list (`*n` entries, capacity `max`): overlapping patches of either kind are removed (new paint covers old), then p is
 // appended (the oldest is dropped when full). Returns how many were covered.

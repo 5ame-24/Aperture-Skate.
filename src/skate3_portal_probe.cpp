@@ -747,11 +747,29 @@ void ForceOnBoard(uint8_t* base, uint32_t self, const char* when) {
   }
 }
 
+// GEL lift (a grounded bounce, PROGRESS 64): instead of a turn, every restored VELOCITY copy (one close to the skater's velocity before the
+// lift) gets the bounce's dv added; other vectors (angular rates, offsets) are put back unchanged.
+bool g_restore_add_on = false;
+float g_restore_add[3] = {}, g_restore_vref[3] = {};
+int g_restore_added = 0;  // copies changed in this lift (logged)
+void RestoreMap(const float v[3], float o[3]) {
+  if (!g_restore_add_on) {
+    Turn(g_restore_m, v, o);
+    return;
+  }
+  const float d[3] = {v[0] - g_restore_vref[0], v[1] - g_restore_vref[1], v[2] - g_restore_vref[2]};
+  const float ref = std::sqrt(g_restore_vref[0] * g_restore_vref[0] + g_restore_vref[1] * g_restore_vref[1] + g_restore_vref[2] * g_restore_vref[2]);
+  const float tol = std::max(1.5f, 0.35f * ref);
+  const bool velocity = d[0] * d[0] + d[1] * d[1] + d[2] * d[2] < tol * tol;
+  for (int k = 0; k < 3; ++k) o[k] = v[k] + (velocity ? g_restore_add[k] : 0.0f);
+  g_restore_added += velocity;
+}
+
 void TurnRaw(uint32_t w[3]) {
   if (!g_restore_turn) return;
   const float v[3] = {BeFloat(w[0]), BeFloat(w[1]), BeFloat(w[2])};
   float o[3];
-  Turn(g_restore_m, v, o);
+  RestoreMap(v, o);
   for (int k = 0; k < 3; ++k) w[k] = __builtin_bswap32(std::bit_cast<uint32_t>(o[k]));
 }
 
@@ -781,7 +799,7 @@ void TurnAndCapBlock(uint8_t* base, uint32_t block) {
   if (const uint32_t actor = g_human) {
     float v[3], o[3];
     if (ReadVec(base, actor + 1248, v) && std::isfinite(v[0] + v[1] + v[2])) {
-      Turn(g_restore_m, v, o);
+      RestoreMap(v, o);
       for (int k = 0; k < 3; ++k) WriteBeFloat(base, actor + 1248 + 4 * k, o[k]);
       REXLOG_INFO("portal-probe: GATE actor velocity turned ({:.2f}, {:.2f}, {:.2f}) -> ({:.2f}, {:.2f}, {:.2f})", v[0], v[1],
                   v[2], o[0], o[1], o[2]);
@@ -789,10 +807,11 @@ void TurnAndCapBlock(uint8_t* base, uint32_t block) {
   }
   for (int i = 0; i < 7; ++i) {
     for (const uint32_t off : {kLinRates, uint32_t(0x1B0)}) {
+      if (g_restore_add_on && off != kLinRates) continue;  // a lift leaves the angular rates alone
       float v[3], o[3];
       const uint32_t addr = block + off + 16 * i;
       if (!ReadVec(base, addr, v) || !std::isfinite(v[0] + v[1] + v[2])) continue;
-      Turn(g_restore_m, v, o);
+      RestoreMap(v, o);
       for (int k = 0; k < 3; ++k) WriteBeFloat(base, addr + 4 * k, o[k]);
     }
   }
@@ -1700,7 +1719,41 @@ bool GateStep(PPCContext& ctx, uint8_t* base, uint32_t self) {
         if (logged_foot++ < 5) REXLOG_INFO("portal-gel: GEL [f {}] skipped: on foot (state 500), gel only acts on the board", g_gate_frame);
       } else {
         const skate3::portal_gel::Effect ge = skate3::portal_gel::HumanStep(feet, p, vel3, riding, gdt, gravity, g_gate_frame);
-        if (ge.kind == skate3::portal_gel::Effect::kBounce) {
+        const float hsp = std::hypot(vel3[0], vel3[2]);
+        if (ge.kind == skate3::portal_gel::Effect::kBounce && ge.lift && hsp >= 0.8f && !(flags & kRelocateBit)) {
+          // Run 197: a bounce added while riding never left the ground (rose 0.0-0.3 m of 5.3: the riding model drops vertical velocity
+          // the same frame). Lift the skater off the paint with the game's own relocation, the crossing's proven speed-keeping path
+          // (SetTransform instead of the board reset, skeleton vectors restored), with dv added to every restored velocity copy instead of a
+          // turn; 0.8 m up starts it airborne (PROGRESS: ~1 m exits start in state 200 and keep their velocity). FLING then holds v_out.
+          const float hx = vel3[0] / hsp, hz = vel3[2] / hsp;
+          const float target[16] = {hz, 0, -hx, 0, 0, 1, 0, 0, hx, 0, hz, 0, p[0], ground[1] + 0.8f, p[2], 1};
+          g_restore_turn = true;
+          g_restore_add_on = true;
+          g_restore_added = 0;
+          for (int c = 0; c < 3; ++c) g_restore_add[c] = ge.dv[c], g_restore_vref[c] = vel3[c];
+          if (ArmTeleport(base, sp, self, flags, target)) {
+            g_last_cross_ns = std::chrono::steady_clock::now().time_since_epoch().count();
+            const float spo = std::sqrt(ge.v_out[0] * ge.v_out[0] + ge.v_out[1] * ge.v_out[1] + ge.v_out[2] * ge.v_out[2]);
+            g_fling = Fling{};
+            g_fling.left = std::clamp(int(REXCVAR_GET(skate3_portal_fling_frames)), 0, 120);
+            g_fling.speed = std::min(spo, kMaxExitSpeed);
+            for (int c = 0; c < 3; ++c) {
+              g_fling.dir[c] = ge.v_out[c] / std::max(spo, 1e-3f);
+              g_fling.vout[c] = g_fling.dir[c] * g_fling.speed;
+            }
+            g_fling.t0 = g_last_cross_ns;
+            g_fling.gravity = gravity;
+            REXLOG_INFO("portal-gel: GEL [f {}] lift armed off blue #{}: feet {:.2f} -> {:.2f}, dv ({:.1f}, {:.1f}, {:.1f}) on every velocity copy, FLING {} "
+                        "frames at {:.1f} m/s", g_gate_frame, ge.patch, ground[1], ground[1] + 0.8f, ge.dv[0], ge.dv[1], ge.dv[2], g_fling.left, g_fling.speed);
+            std::copy(p, p + 3, last);
+            return true;  // the hook runs the relocation like a crossing (t_surgery)
+          }
+          g_restore_add_on = false;
+          REXLOG_INFO("portal-gel: GEL [f {}] lift refused by the relocation (flags {:08X})", g_gate_frame, flags);
+        } else if (ge.kind == skate3::portal_gel::Effect::kBounce && ge.lift) {
+          static int slow = 0;
+          if (slow++ < 10) REXLOG_INFO("portal-gel: GEL [f {}] lift skipped: {:.1f} m/s is too slow to know the heading", g_gate_frame, hsp);
+        } else if (ge.kind == skate3::portal_gel::Effect::kBounce) {
           AddVelocity(base, self, ge.dv);
           const float sp = std::sqrt(ge.v_out[0] * ge.v_out[0] + ge.v_out[1] * ge.v_out[1] + ge.v_out[2] * ge.v_out[2]);
           if (REXCVAR_GET(skate3_portal_fling) && sp > 1.0f) {
@@ -1718,6 +1771,24 @@ bool GateStep(PPCContext& ctx, uint8_t* base, uint32_t self) {
           }
         } else if (ge.kind == skate3::portal_gel::Effect::kBoost) {
           AddVelocity(base, self, ge.dv);
+          // Run 197: out <= in on orange; vector writes while riding do not stick. The board's cached speed (board +0x104, the value the
+          // board reset saves and the restore puts back) is raised too, and the log says whether last frame's write was still there.
+          uint32_t board = 0, raw = 0;
+          static float written = -1.0f;
+          static int boost_logs = 0;
+          if (ReadBe32(base, self + 1880, &board) && board >= 0x10000 && ReadBe32(base, board + 0x104, &raw)) {
+            const float cached = std::bit_cast<float>(raw);
+            const float add = std::sqrt(ge.dv[0] * ge.dv[0] + ge.dv[2] * ge.dv[2]);
+            if (std::isfinite(cached) && cached > 0.5f && cached < kMaxExitSpeed) {
+              if (boost_logs++ < 40) {
+                REXLOG_INFO("portal-gel: GEL [f {}] boost: cached speed {:.2f} (last write {:.2f}: {}), +{:.2f}, tracked {:.1f} m/s", g_gate_frame, cached,
+                            written, written < 0 ? "none" : std::abs(cached - written) < 0.05f ? "held" : cached > written ? "raised further" : "overwritten",
+                            add, hsp);
+              }
+              written = cached + add;
+              WriteBeFloat(base, board + 0x104, written);
+            }
+          }
         }
       }
     }
@@ -1908,6 +1979,7 @@ bool GateStep(PPCContext& ctx, uint8_t* base, uint32_t self) {
   REXLOG_INFO("portal-probe: GATE velocity in ({:.1f}, {:.1f}, {:.1f}) out ({:.1f}, {:.1f}, {:.1f}), matrix change {:.2f}",
               vin[0], vin[1], vin[2], vout[0], vout[1], vout[2], change);
   g_restore_turn = change > 0.05f && REXCVAR_GET(skate3_portal_gate_turn);
+  g_restore_add_on = false;
   std::copy(cross.vel, cross.vel + 9, g_restore_m);
   // Exit height: a target at ground level makes the game put the skater off the board (state 500) and the
   // speed dies; a target ~1 m above the ground starts it airborne (state 200), which keeps the velocity (7 of 9
@@ -2546,6 +2618,11 @@ extern "C" REX_FUNC(sub_82DB88C8) {
     REXLOG_INFO("portal-probe: NPCX actor {:08X}: the teleport did not reset the board (no SetTransform swap happened)", self);
   }
   t_npc_actor = 0;
+  if (self == g_human && gate_armed && g_restore_add_on) {
+    REXLOG_INFO("portal-gel: GEL lift done: {} velocity copies got the bounce", g_restore_added);
+    g_restore_add_on = false;
+    g_restore_turn = false;
+  }
   if (self == g_human && gate_armed) {
     g_onboard_frames = 12;
     g_recover_window = 300;

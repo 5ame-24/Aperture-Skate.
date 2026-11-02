@@ -421,7 +421,15 @@ int main() {
     wall.n[0] = 1;
     wall.n[1] = 0;
     const float into[3] = {-8, 1, 3}, past[3] = {0, 0, 9};
-    CHECK(GelBounce(wall, into, true, gr, out) && Near(out[0], 8.0f) && Near(out[1], gr.wall_up) && Near(out[2], 3));
+    CHECK(GelBounce(wall, into, false, gr, out) && Near(out[0], 8.0f) && Near(out[1], gr.wall_up) && Near(out[2], 3));
+    CHECK(GelBounce(wall, into, true, gr, out) && Near(out[0], 8.0f) && Near(out[1], 1) && Near(out[2], 3));  // grounded: no wall jump
+    // the cap: a 20 m/s fall comes out at max_bounce (never below the floor minimum)
+    GelRules capped = gr;
+    capped.max_bounce = 10.0f;
+    const float hard[3] = {0, -20, 0};
+    CHECK(GelBounce(floor, hard, false, capped, out) && Near(out[1], 10.0f));
+    capped.max_bounce = 1.0f;
+    CHECK(GelBounce(floor, hard, false, capped, out) && Near(out[1], gr.min_bounce));
     CHECK(!GelBounce(wall, past, true, gr, out));
     const float slow[3] = {-1, 0, 0};
     CHECK(GelBounce(wall, slow, false, gr, out) && Near(out[0], gr.wall_min));
@@ -434,7 +442,7 @@ int main() {
     GelPatch list[4];
     int n = 0;
     GelPatch a = floor, b = floor, c = floor, w2 = wall;
-    b.c[0] = 1.0f;
+    b.c[0] = 0.4f;  // nearly the same spot: covers a
     b.kind = 1;
     c.c[0] = 10.0f;
     w2.c[1] = 2.0f;
@@ -443,6 +451,9 @@ int main() {
     CHECK(GelPaint(list, &n, 4, c) == 0 && n == 2);
     CHECK(GelPaint(list, &n, 4, w2) == 0 && n == 3);
     CHECK(!GelOverlaps(floor, wall));
+    GelPatch next = floor;
+    next.c[0] = 1.5f;  // a splat next to it (discs overlap) stays
+    CHECK(!GelOverlaps(floor, next));
     for (int i = 0; i < 5; ++i) {
       GelPatch far = floor;
       far.c[2] = 20.0f + 10.0f * float(i);

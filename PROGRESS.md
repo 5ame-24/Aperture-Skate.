@@ -711,3 +711,20 @@ Actor offsets: +1200/+1216 ground pos, +1232 delta, +1248 velocity, +1296 flags,
       around each pointer, and the table stride where neighbours also point at names. Ctrl+0 / Ctrl+Shift+0 unchanged.
     - SDK changes needed (not done, third_party/rexglue-sdk): an Esc-menu row "Portal character: Off / Chell / Atlas / P-body" bound to
       skate3_portal_chell + skate3_portal_character (same cvars Ctrl+0 sets), next to "Portal First-Person View Follows".
+64. Run 197 gel feedback -> fixes (built, untested). Read: velocity added while RIDING is dropped by the game the same frame (floor bounce
+    rose 0.0-0.3 m of 5.3 "riding"; orange out <= in; FLING's top-up every frame); added while AIRBORNE it sticks (landing bounces, the
+    "second bounce higher than the first ollie" = a landing from the ollie, bounced at the fall speed).
+    - Grounded blue (floor or wall) = a LIFT: the game's own relocation, like a crossing (t_surgery: SetTransform instead of the board reset,
+      skeleton vectors restored), 0.8 m up, same heading, and instead of a turn every restored VELOCITY copy (within max(1.5, 0.35|v|) of
+      the pre-lift velocity: board linear rates, actor +1248, skeleton vectors) gets the bounce's dv; angular rates untouched (RestoreMap).
+      FLING then holds v_out. Logs `GEL lift armed off blue #k: feet a -> b, dv (...)`, `GEL lift done: N velocity copies got the bounce`,
+      `lift skipped` (< 0.8 m/s, no heading). So the first contact (rolling on, or an ollie's take-off) bounces.
+    - Cap: skate3_portal_gel_bounce_max_height (6.6 m) caps any bounce (`capped` in the bounce line); the minimum stays 5.3 m.
+    - Walls: the upward 7 m/s is Portal 2's wall jump (bounce_paint_wall_jump_upward_speed 275); now only when AIRBORNE (Portal:
+      trampoline_bounce_off_walls_while_on_ground 0); riding into blue wall paint reflects you sideways (with a lift). skate3_portal_gel_wall_up.
+    - Orange: also raises the board's cached speed (board +0x104, saved and put back by the board reset) each frame on the paint;
+      `GEL boost: cached speed X (last write Y: held | raised further | overwritten)` tells whether that store sticks.
+    - Splats: GelOverlaps now only for nearly the same spot (centres < 0.25 x the radii sum, ~0.9 m): painting next to a splat keeps it.
+    - Props: falling onto blue at >= 1.5 m/s comes back at least skate3_portal_gel_prop_bounce (5 m/s, ~1.3 m); run 197's reflections were
+      1-2 m/s settling props (a few cm, invisible).
+    - Later round (requested): an in-air gel object (Portal-style) to help aim the mechanic.

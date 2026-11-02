@@ -22,6 +22,20 @@ REXCVAR_DEFINE_DOUBLE(skate3_portal_gel_bounce_height, 5.3, "Skate 3",
                       "(bounce_paint_min_speed 500 under sv_gravity 600). Turned into a speed with the skater's measured gravity.")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
+REXCVAR_DEFINE_DOUBLE(skate3_portal_gel_bounce_max_height, 6.6, "Skate 3",
+                      "Highest a blue floor bounce launches you (m): a big drop onto the paint comes back at most this high (0 = no cap, "
+                      "Portal's restitution 1 keeps the whole fall).")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
+REXCVAR_DEFINE_DOUBLE(skate3_portal_gel_wall_up, 7.0, "Skate 3",
+                      "Upward speed (m/s) an airborne bounce off blue wall paint gives at least (Portal 2 wall jump: 275 u/s = 7.0); riding "
+                      "into the wall gives none.")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
+REXCVAR_DEFINE_DOUBLE(skate3_portal_gel_prop_bounce, 5.0, "Skate 3",
+                      "Smallest speed (m/s) a prop falling onto blue paint comes back up with (Portal cubes keep bouncing).")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
 REXCVAR_DEFINE_DOUBLE(skate3_portal_gel_boost_cap, 20.3, "Skate 3",
                       "Top speed (m/s) orange gel pushes the board up to (Portal 2 sv_speed_paint_max 800 = 20.3 m/s).")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
@@ -62,6 +76,9 @@ void SyncRules(float gravity) {
   const float g = gravity > 1.0f ? gravity : 9.81f;
   g_rules.min_bounce = std::sqrt(2.0f * g * std::max(0.0f, float(REXCVAR_GET(skate3_portal_gel_bounce_height))));
   g_rules.boost_cap = float(REXCVAR_GET(skate3_portal_gel_boost_cap));
+  const float hmax = float(REXCVAR_GET(skate3_portal_gel_bounce_max_height));
+  g_rules.max_bounce = hmax > 0.0f ? std::sqrt(2.0f * g * hmax) : 0.0f;
+  g_rules.wall_up = float(REXCVAR_GET(skate3_portal_gel_wall_up));
 }
 
 }  // namespace
@@ -171,6 +188,7 @@ Effect HumanStep(const float feet[3], const float centre[3], const float v[3], b
       g_last_bounce_ns = now;
       e.kind = Effect::kBounce;
       e.patch = int(g.id);
+      e.lift = grounded;  // the game drops velocity added while the board is on the ground (run 197): the probe lifts it off first
       for (int k = 0; k < 3; ++k) {
         e.v_out[k] = out[k];
         e.dv[k] = out[k] - v[k];
@@ -178,7 +196,8 @@ Effect HumanStep(const float feet[3], const float centre[3], const float v[3], b
       const float vn = pm::Dot(v, g.n), on = pm::Dot(out, g.n);
       REXLOG_INFO("portal-gel: GEL [f {}] bounce on blue #{} ({}): v ({:.1f}, {:.1f}, {:.1f}) -> ({:.1f}, {:.1f}, {:.1f}), {:.1f} m/s into it -> {:.1f} out "
                   "({}), {}", frame, g.id, Surface(g), v[0], v[1], v[2], out[0], out[1], out[2], -vn, on,
-                  -vn * g_rules.restitution >= on - 0.01f ? "speed kept" : "minimum bounce", grounded ? "riding" : "airborne");
+                  on >= g_rules.max_bounce - 0.01f && g_rules.max_bounce > 0.0f ? "capped" : -vn * g_rules.restitution >= on - 0.01f ? "speed kept" : "minimum bounce",
+                  grounded ? "riding: lift" : "airborne");
       if (flat && gravity > 1.0f) {
         g_watch = BounceWatch{};
         g_watch.on = true;
@@ -238,11 +257,12 @@ bool BodyStep(const float p[3], const float v[3], float out_v[3]) {
   }
   for (int i = n - 1; i >= 0; --i) {
     if (list[i].kind != 0 || !pm::GelTouch(list[i], p, g_rules, nullptr)) continue;
-    // props get the restitution only (no minimum: a prop lying on blue gel stays put; a dropped one bounces back to nearly its height)
+    // Props: falling onto the paint at 1.5 m/s or more comes back at least skate3_portal_gel_prop_bounce (run 197: with no minimum a prop
+    // settling at 1-2 m/s rose a few cm, invisible); one lying on it stays put (it moves into the paint slower than that).
     pm::GelRules r = g_rules;
-    r.min_bounce = 0.0f;
-    r.wall_min = 0.0f;
-    r.min_into = 1.0f;
+    r.min_bounce = float(REXCVAR_GET(skate3_portal_gel_prop_bounce));
+    r.wall_min = 0.5f * r.min_bounce;
+    r.min_into = 1.5f;
     if (pm::GelBounce(list[i], v, false, r, out_v)) return true;
   }
   return false;
