@@ -784,3 +784,14 @@ Actor offsets: +1200/+1216 ground pos, +1232 delta, +1248 velocity, +1296 flags,
       round k: [oooxx-oo] 3 off, nudged (...)` (o on the surface, x another surface, - nothing), `fits after nudging`, `does not fit`,
       `best effort`, `pushed X m clear of the orange portal`. Answers wait at most 1.5 s, then the round is asked again.
     - Unit tests: RimProbe / RimProbeOk / FitShift / OverlapPush.
+70. Exit angles (user: "exit angles often aren't consistent with entry angles"; built, untested).
+    - Cause: the crossing's exit heading came from v_in = this frame's HORIZONTAL displacement (vertical dropped, one noisy frame), while
+      FLING and the board-rate turn use the smoothed 3D velocity and the full pair matrix: speed and facing left the portal in different
+      directions for angled, jumping or falling entries. v_in is now the smoothed 3D velocity for everything.
+    - Facing through the portal: Portal keeps your orientation relative to the portals. FACING learns which axis of the skater's presentation
+      matrix (native_entity::CharacterWorldMatrix; 3 columns / 3 rows) is forward while riding fast (>3 m/s, 2 s clear of a crossing;
+      portal_math::FacingLearner, tested; sign by majority so fakie stretches do not flip it); once it agrees >= 0.9, a crossing turns that
+      facing by the pair matrix and the exit faces that way (fakie stays fakie, an angled entry stays angled). When the turned facing is
+      (nearly) vertical (floor -> wall) the velocity heading is used; when the velocity is vertical too, the last heading turned through
+      the pair. Logs `FACING learned: forward = entity matrix row/column k (+/-), agreement A`, `GATE exit facing from your facing (axis k): in
+      (...) -> out (...); velocity heading out (...)`, `exit heading from your last heading`.

@@ -1882,6 +1882,27 @@ const bool g_charsel_runner_set = (skate3::portal_chell::SetSelectorProbeRunner(
   return true;
 }), true);
 
+float g_last_heading[2] = {0, 0};  // the skater's last horizontal travel direction with real speed (> 1 m/s), for vertical exits
+// FACING: which axis of the skater's presentation matrix is "forward" (learned while riding fast), so a crossing turns the real facing
+// through the pair (entering fakie or at an angle comes out the same way relative to the exit portal), not the travel direction.
+skate3::portal_math::FacingLearner g_facing;
+bool g_facing_logged = false;
+bool FacingNow(uint8_t* base, float out[3], int* axis_out) {
+  int axis;
+  float sign, agree;
+  if (!g_facing.Best(&axis, &sign, &agree) || agree < 0.9f) return false;
+  const uint32_t he = g_human_entity;
+  float rows[12];
+  if (!he || !skate3::native_entity::CharacterWorldMatrix(base, he, rows)) return false;
+  const float R[9] = {rows[0], rows[1], rows[2], rows[4], rows[5], rows[6], rows[8], rows[9], rows[10]};
+  skate3::portal_math::FacingLearner::Axis(R, axis, out);
+  const float l = std::sqrt(out[0] * out[0] + out[1] * out[1] + out[2] * out[2]);
+  if (l < 1e-3f) return false;
+  for (int k = 0; k < 3; ++k) out[k] *= sign / l;
+  *axis_out = axis;
+  return true;
+}
+
 // Tracking re-acquire (FPVTRACK): frames since the last crossing, its exit point, and frames without a usable position.
 int g_track_since_cross = 1000, g_track_lost = 0;
 float g_track_exit[3] = {};
@@ -2010,6 +2031,24 @@ bool GateStep(PPCContext& ctx, uint8_t* base, uint32_t self) {
     if (have && dt > 0.001f && dt < 0.2f) {
       speed_now = std::hypot(p[0] - last[0], p[2] - last[2]) / dt;
       for (int c = 0; c < 3; ++c) vel3[c] += ((p[c] - last[c]) / dt - vel3[c]) * 0.5f;
+      const float hv = std::hypot(vel3[0], vel3[2]);
+      if (hv > 1.0f) g_last_heading[0] = vel3[0] / hv, g_last_heading[1] = vel3[2] / hv;
+      // learn the facing axis from clean riding (fast, well clear of a crossing)
+      if (riding && hv > 3.0f && g_track_since_cross > 60 && g_facing.n < 3000) {
+        float rows[12];
+        if (const uint32_t he = g_human_entity; he && skate3::native_entity::CharacterWorldMatrix(base, he, rows)) {
+          const float R[9] = {rows[0], rows[1], rows[2], rows[4], rows[5], rows[6], rows[8], rows[9], rows[10]};
+          g_facing.Add(R, g_last_heading);
+          int axis;
+          float sign, agree;
+          if (!g_facing_logged && g_facing.Best(&axis, &sign, &agree)) {
+            g_facing_logged = true;
+            REXLOG_INFO("portal-probe: FACING [f {}] learned: forward = entity matrix {} {} ({}), agreement {:.2f} over {} riding samples{}", g_gate_frame,
+                        axis < 3 ? "column" : "row", axis % 3, sign > 0 ? "+" : "-", agree, g_facing.n,
+                        agree < 0.9f ? " - too low, crossings keep using the velocity heading" : "");
+          }
+        }
+      }
     } else if (!have) {
       vel3[0] = vel3[1] = vel3[2] = 0.0f;
     }
@@ -2300,8 +2339,15 @@ bool GateStep(PPCContext& ctx, uint8_t* base, uint32_t self) {
   float vin[3] = {0, 0, 0}, vout[3];
   const float dlen = std::hypot(hx, hz);
   const float meas[2] = {dlen > 0.01f ? hx / dlen * speed_before : 0.0f, dlen > 0.01f ? hz / dlen * speed_before : 0.0f};
-  vin[0] = meas[0];
-  vin[2] = meas[1];
+  // Velocity in = the smoothed 3D velocity (the same one FLING and the rate turn use). It was this frame's HORIZONTAL displacement: the
+  // vertical part was dropped and one frame is noisy, so the facing came out at another angle than the speed (user: exit angles often not
+  // consistent with entry angles).
+  if (std::sqrt(vel3[0] * vel3[0] + vel3[1] * vel3[1] + vel3[2] * vel3[2]) > 0.5f) {
+    std::copy(vel3, vel3 + 3, vin);
+  } else {
+    vin[0] = meas[0];
+    vin[2] = meas[1];
+  }
   if (speed_before >= 3.0f && REXCVAR_GET(skate3_portal_probe)) {
     g_scan.clear();
     g_scan_frames = 0;
@@ -2322,7 +2368,34 @@ bool GateStep(PPCContext& ctx, uint8_t* base, uint32_t self) {
     std::copy(vin, vin + 3, vout);
   }
   float len = std::hypot(vout[0], vout[2]);
-  if (len < 0.5f) {
+  float facing_in[3], facing_out[3];
+  int facing_axis = -1;
+  bool use_facing = false;
+  if (FacingNow(base, facing_in, &facing_axis)) {
+    Turn(cross.vel, facing_in, facing_out);
+    use_facing = std::hypot(facing_out[0], facing_out[2]) > 0.3f;
+  }
+  if (use_facing) {
+    // your own facing, turned through the pair (fakie stays fakie, an angled entry stays angled relative to the exit portal)
+    hx = facing_out[0];
+    hz = facing_out[2];
+    REXLOG_INFO("portal-probe: GATE [f {}] exit facing from your facing (axis {}): in ({:.2f}, {:.2f}, {:.2f}) -> out ({:.2f}, {:.2f}, {:.2f}); "
+                "velocity heading out ({:.2f}, {:.2f})", g_gate_frame, facing_axis, facing_in[0], facing_in[1], facing_in[2], facing_out[0],
+                facing_out[1], facing_out[2], len > 0.01f ? vout[0] / len : 0.0f, len > 0.01f ? vout[2] / len : 0.0f);
+    len = std::hypot(hx, hz);
+  } else if (len < 0.5f && std::hypot(g_last_heading[0], g_last_heading[1]) > 0.5f) {
+    // Falling (nearly) straight in, or straight out (floor <-> ceiling, floor -> floor): the exit velocity has no heading. Keep your own
+    // heading, turned through the pair like everything else (Portal keeps your view relative to the portals); if that is vertical too, as is.
+    const float h3[3] = {g_last_heading[0], 0.0f, g_last_heading[1]};
+    float ht[3];
+    Turn(cross.vel, h3, ht);
+    const float tl = std::hypot(ht[0], ht[2]);
+    hx = tl > 0.3f ? ht[0] : h3[0];
+    hz = tl > 0.3f ? ht[2] : h3[2];
+    len = std::hypot(hx, hz);
+    REXLOG_INFO("portal-probe: GATE [f {}] exit heading from your last heading ({:.2f}, {:.2f}){}: the exit velocity is vertical", g_gate_frame, h3[0],
+                h3[2], tl > 0.3f ? ", turned through the pair" : ", kept");
+  } else if (len < 0.5f) {
     hx = cross.exit_dir[0];
     hz = cross.exit_dir[1];
     len = std::hypot(hx, hz);

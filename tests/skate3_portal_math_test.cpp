@@ -558,6 +558,26 @@ int main() {
     SetFrame(w2, c2, n2, u0, 0.0f);  // another wall: no push
     CHECK(!OverlapPush(f, w2, kHalfWidth, kHalfHeight, push));
   }
+  {
+    // facing: a skater whose forward is the matrix's third ROW, riding along it (and fakie 20% of the time), turning around
+    FacingLearner fl;
+    for (int i = 0; i < 100; ++i) {
+      const float a = 0.13f * float(i);
+      const float c = std::cos(a), sn = std::sin(a);
+      // rows: right, up, forward = (sin a, 0, cos a)
+      const float R[9] = {c, 0, -sn, 0, 1, 0, sn, 0, c};
+      const float dir = (i % 5 == 0) ? -1.0f : 1.0f;  // fakie every fifth sample
+      const float travel[2] = {dir * sn, dir * c};
+      fl.Add(R, travel);
+    }
+    int axis = -1;
+    float sign = 0, agree = 0;
+    CHECK(fl.Best(&axis, &sign, &agree) && axis == 5 && sign > 0 && agree > 0.99f);
+    FacingLearner few;
+    const float I[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1}, t0[2] = {0, 1};
+    few.Add(I, t0);
+    CHECK(!few.Best(&axis, &sign, &agree));
+  }
   std::puts("skate3_portal_math_test: ok");
   return 0;
 }

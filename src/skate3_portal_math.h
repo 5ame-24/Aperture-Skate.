@@ -85,6 +85,20 @@ int FitShift(const bool ok[kRimProbes], const FitRules& rules, float shift[2]);
 // `a`, or false when they are on different surfaces or already clear.
 bool OverlapPush(const Frame& a, const Frame& b, float hw, float hh, float shift[3]);
 
+// ---- Facing through a portal (entry and exit angles agree) ----
+// Which axis of the skater's presentation matrix (3x3 rows R) points forward is learned while riding fast: of its 3 columns and 3 rows,
+// the one whose horizontal direction agrees best with the travel direction, and its sign by majority (riding fakie now and then does not
+// flip it). Then a crossing turns the skater's actual facing through the pair, as Portal keeps your orientation relative to the portals.
+struct FacingLearner {
+  float score[6] = {}, sgn[6] = {};
+  int n = 0;
+  // R: 9 floats (rows); travel: unit horizontal travel direction (x, z)
+  void Add(const float R[9], const float travel[2]);
+  // false until 60 samples; agree = mean |cos| of the best axis (1 = always along the travel line)
+  bool Best(int* axis, float* sign, float* agree) const;
+  static void Axis(const float R[9], int axis, float out[3]);  // axis 0..2 = column, 3..5 = row
+};
+
 // ---- Camera poses (portal camera carry) ----
 // A camera pose: world position and its axes. Row-vector view matrices (p_view = p_world * V, as the game and the native renderer
 // use) keep right/up/forward in columns 0/1/2 of the upper 3x3 and -pos . axis in row 3.

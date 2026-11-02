@@ -123,6 +123,34 @@ bool OverlapPush(const Frame& a, const Frame& b, float hw, float hh, float shift
   return true;
 }
 
+void FacingLearner::Axis(const float R[9], int axis, float out[3]) {
+  for (int k = 0; k < 3; ++k) out[k] = axis < 3 ? R[k * 3 + axis] : R[(axis - 3) * 3 + k];
+}
+
+void FacingLearner::Add(const float R[9], const float travel[2]) {
+  for (int a = 0; a < 6; ++a) {
+    float v[3];
+    Axis(R, a, v);
+    const float hl = std::hypot(v[0], v[2]);
+    if (hl < 0.5f) continue;  // (nearly) vertical: not a heading
+    const float c = (v[0] * travel[0] + v[2] * travel[1]) / hl;
+    score[a] += std::abs(c);
+    sgn[a] += c;
+  }
+  ++n;
+}
+
+bool FacingLearner::Best(int* axis, float* sign, float* agree) const {
+  if (n < 60) return false;
+  int b = 0;
+  for (int a = 1; a < 6; ++a)
+    if (score[a] > score[b]) b = a;
+  *axis = b;
+  *sign = sgn[b] >= 0.0f ? 1.0f : -1.0f;
+  *agree = score[b] / float(n);
+  return true;
+}
+
 bool TestCrossing(const Frame g[2], const float prev[3], const float now[3], bool standing_ok, const Rules& rules, Crossing* out) {
   for (int i = 0; i < 2; ++i) {
     const Frame& e = g[i];
