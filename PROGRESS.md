@@ -905,3 +905,12 @@ Actor offsets: +1200/+1216 ground pos, +1232 delta, +1248 velocity, +1296 flags,
     fling treatment; downward exits are left to gravity. The carry's result line adds the skater bodies' upward speed as the game left it
     (before our write) for each of the first 10 frames, to see whether the game fights the carry on the small drops that fell short or
     did not fly (#14, #206, #210).
+81. Carry everywhere (built, untested; user: "make all flings work as good as carry"). What run 214 taught: the store that works is the
+    skater's own physics bodies right after their rigid-body update; every store top-up (board rates, actor, skeleton) is rewritten by the
+    riding model. So carry is now THE momentum mechanism (fling mode "carry", default):
+    - every crossing with an exit velocity: after its teleport ends, StartCarry(v_out) (gravity included): an upward launch to the top of
+      its arc (with the on-board release and the ollie pop, as before), anything else (wall exits, angled, downward) for
+      skate3_portal_carry_short (0.4 s) so the game takes the speed over. On the board and on foot alike (on-foot crossings arm the hold too).
+    - gel: an airborne blue bounce starts a carry at once; a grounded bounce (the lift relocation) is treated like a crossing's launch
+      after its teleport (pop + carry when upward).
+    - rule (5) of the crossing pipeline (PROGRESS 75) is now: the exit velocity is CARRIED (bodies), and held in the stores as before.

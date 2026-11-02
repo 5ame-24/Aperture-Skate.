@@ -81,6 +81,11 @@ REXCVAR_DEFINE_DOUBLE(skate3_portal_gate_riding_lift, 0.6, "Skate 3",
                       "the restored velocity (state-100 crossings kept ~45%, airborne ones 96%). 0 = off.")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
+REXCVAR_DEFINE_DOUBLE(skate3_portal_carry_short, 0.4, "Skate 3",
+                      "Seconds a crossing that does not launch you upward (wall exits, angled, downward) is carried at its exit velocity, so the game "
+                      "takes the speed over (upward launches are carried to the top of the arc).")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
 REXCVAR_DEFINE_BOOL(skate3_portal_fling_release_onboard, true, "Skate 3",
                     "Fling exits (steep or upward): force the on-board byte only while the teleport lasts (state 700/702), not 12 frames, so the "
                     "game can go airborne instead of snapping the board to the ground (run 211: riding at once, flings gone).")
@@ -858,7 +863,7 @@ int g_onboard_frames = 0;
 bool g_onboard_teleport_only = false;
 // A fling exit waiting for its teleport to end, then the mode's move (skate3_portal_fling_mode), then one result line 1.2 s later.
 struct FlingExit {
-  bool pending = false, watching = false;
+  bool pending = false, watching = false, steep = false;
   int mode = 0, seq = 0, frames = 0;
   float y0 = 0, peak = 0, vout_y = 0, gravity = 9.81f, vy_max = -1e9f, fall_in = 0;
   int64_t t0 = 0;
@@ -875,6 +880,24 @@ struct Carry {
   std::atomic<float> vy_sum[10] = {};
   std::atomic<int> vy_n[10] = {};
 } g_carry;
+// One mechanism for every momentum effect (run 214: carry FLEW where every store top-up failed): the skater's own physics bodies get
+// v(t) = v - g t after each rigid-body update for `seconds`. Used by every crossing (after the teleport), gel bounces, on foot and on board.
+void StartCarry(const float v[3], float gravity, float seconds) {
+  const int64_t now = std::chrono::steady_clock::now().time_since_epoch().count();
+  std::copy(v, v + 3, g_carry.vout);
+  g_carry.gravity = gravity;
+  g_carry.t0 = now;
+  g_carry.until = now + int64_t(std::clamp(seconds, 0.1f, 1.5f) * 1e9);
+  g_carry.writes = 0;
+  for (int i = 0; i < 10; ++i) g_carry.vy_sum[i] = 0.0f, g_carry.vy_n[i] = 0;
+  g_carry.active = true;
+}
+// how long to carry a launch: an upward one to the top of its arc, anything else long enough for the game to take the velocity over
+float CarrySeconds(const float v[3], float gravity) {
+  const float l = std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+  if (v[1] > 0.3f * l && v[1] > 1.0f) return std::clamp(v[1] / std::max(1.0f, gravity), 0.3f, 1.5f);
+  return float(REXCVAR_GET(skate3_portal_carry_short));
+}
 bool g_fling_steep_exit = false;  // set by the crossing: |v_out.y| > half its speed, or out of a floor upward
 int g_recover_window = 0;  // frames after a crossing in which the game's own recovery warps keep the board's rates
 
@@ -2378,6 +2401,8 @@ bool GateStep(PPCContext& ctx, uint8_t* base, uint32_t self) {
             }
             g_fling.t0 = g_last_cross_ns;
             g_fling.gravity = gravity;
+            // the lift is a relocation: after its teleport the hook carries the bounce like a crossing's launch (pop + carry when upward)
+            g_fling_steep_exit = ge.v_out[1] > 0.5f * spo;
             REXLOG_INFO("portal-gel: GEL [f {}] lift armed off blue #{}: feet {:.2f} -> {:.2f}, dv ({:.1f}, {:.1f}, {:.1f}) on every velocity copy, FLING {} "
                         "frames at {:.1f} m/s", g_gate_frame, ge.patch, ground[1], ground[1] + 0.8f, ge.dv[0], ge.dv[1], ge.dv[2], g_fling.left, g_fling.speed);
             std::copy(p, p + 3, last);
@@ -2390,6 +2415,8 @@ bool GateStep(PPCContext& ctx, uint8_t* base, uint32_t self) {
           if (slow++ < 10) REXLOG_INFO("portal-gel: GEL [f {}] lift skipped: {:.1f} m/s is too slow to know the heading", g_gate_frame, hsp);
         } else if (ge.kind == skate3::portal_gel::Effect::kBounce) {
           AddVelocity(base, self, ge.dv);
+          // airborne bounce: carried through the integrator (run 214's mechanism), not only the stores the game rewrites
+          if (skate3::portal_gate::FlingMode() == 4) StartCarry(ge.v_out, gravity, CarrySeconds(ge.v_out, gravity));
           const float sp = std::sqrt(ge.v_out[0] * ge.v_out[0] + ge.v_out[1] * ge.v_out[1] + ge.v_out[2] * ge.v_out[2]);
           if (REXCVAR_GET(skate3_portal_fling) && sp > 1.0f) {
             g_fling = Fling{};
@@ -3403,21 +3430,13 @@ extern "C" REX_FUNC(sub_82DB88C8) {
     if (st != 700 && st != 702) {
       // the teleport is over (the game put the skater down riding): get airborne the chosen way, so the held exit velocity sticks
       g_fexit.pending = false;
-      g_onboard_frames = 0;  // every mode releases the on-board byte
-      if (g_fexit.mode == 0 || g_fexit.mode == 4) {
-        skate3::portal_gate::RequestOllie();  // the game's own pop
+      if (g_fexit.steep) {
+        g_onboard_frames = 0;  // an upward launch: release the on-board byte so the game can go airborne
+        if (g_fexit.mode == 0 || g_fexit.mode == 4) skate3::portal_gate::RequestOllie();  // the game's own pop
       }
       if (g_fexit.mode == 4) {
-        const int64_t now = std::chrono::steady_clock::now().time_since_epoch().count();
-        std::copy(g_fling.vout, g_fling.vout + 3, g_carry.vout);
-        g_carry.gravity = g_fling.gravity;
-        g_carry.t0 = now;
-        const float apex = g_fling.vout[1] > 0 ? g_fling.vout[1] / std::max(1.0f, g_fling.gravity) : 0.3f;
-        g_carry.until = now + int64_t(std::clamp(apex, 0.3f, 1.5f) * 1e9);
-        g_carry.writes = 0;
-        for (int i = 0; i < 10; ++i) g_carry.vy_sum[i] = 0.0f, g_carry.vy_n[i] = 0;
-        g_carry.active = true;
-      } else if (g_fexit.mode == 1) {
+        StartCarry(g_fling.vout, g_fling.gravity, CarrySeconds(g_fling.vout, g_fling.gravity));  // every crossing, on board and on foot
+      } else if (g_fexit.steep && g_fexit.mode == 1) {
         uint32_t fl = 0, skel = 0, w = 0;
         WriteBe32(base, self + 1336, 200);
         if (ReadBe32(base, self + 1296, &fl)) WriteBe32(base, self + 1296, (fl & 0x0FFFFFFFu) | 0x90000000u);
@@ -3428,7 +3447,7 @@ extern "C" REX_FUNC(sub_82DB88C8) {
       g_fling.k = 0;
       g_fling.ok_run = 0;
       g_fling.left = std::clamp(int(REXCVAR_GET(skate3_portal_fling_frames)), 6, 120);
-      g_fexit.watching = true;
+      g_fexit.watching = g_fexit.steep;  // (the result line is for upward launches; CROSSCHECK scores the rest)
       g_fexit.frames = 0;
       g_fexit.vy_max = -1e9f;
       g_fexit.t0 = g_fling.t0;
@@ -3488,8 +3507,9 @@ extern "C" REX_FUNC(sub_82DB88C8) {
   if (self == g_human && gate_armed) {
     g_onboard_frames = 12;
     g_onboard_teleport_only = g_fling_steep_exit && REXCVAR_GET(skate3_portal_fling_release_onboard);
-    if (g_fling_steep_exit && g_fling.left > 0) {
-      g_fexit.pending = true;  // the mode's move once the teleport ends
+    if (g_fling.left > 0) {  // every crossing with an exit velocity: the move once the teleport ends (carry for all, the pop for upward ones)
+      g_fexit.pending = true;
+      g_fexit.steep = g_fling_steep_exit;
       g_fexit.mode = skate3::portal_gate::FlingMode();
       g_fexit.seq = ++g_fexit_seq;
       g_fexit.vout_y = g_fling.vout[1];
