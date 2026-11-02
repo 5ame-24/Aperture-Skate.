@@ -297,6 +297,30 @@ int main() {
     Mul4(a, b, o);
     CHECK(Near(o[0], 2) && Near(o[5], 3) && Near(o[10], 4) && Near(o[12], 10) && Near(o[13], 18) && Near(o[14], 28) && Near(o[15], 1));
   }
+  // ---- fits ----
+  {
+    // A 0.6 s ballistic arc at 60 Hz, g = 14, with +-1 cm deterministic noise: the quadratic recovers g, the line fit of v_y recovers it.
+    float t[40], y[40], vy[40];
+    for (int i = 0; i < 36; ++i) {
+      t[i] = 3.0f + i / 60.0f;  // not starting at 0, like real timestamps
+      const float tt = t[i] - 3.0f;
+      y[i] = 64.0f + 5.0f * tt - 7.0f * tt * tt + 0.01f * ((i * 7919) % 3 - 1);
+      vy[i] = 5.0f - 14.0f * tt;
+    }
+    float a, b, c, r2;
+    CHECK(FitQuadratic(t, y, 36, &a, &b, &c, &r2));
+    CHECK(Near(-2 * c, 14.0f, 0.6f) && r2 > 0.99f);
+    CHECK(FitLine(t, vy, 36, &a, &b, &r2));
+    CHECK(Near(-b, 14.0f, 1e-3f) && Near(r2, 1.0f, 1e-4f));
+    CHECK(!FitLine(t, vy, 2, &a, &b, &r2));
+    float tc[5] = {1, 1, 1, 1, 1};
+    CHECK(!FitQuadratic(tc, y, 5, &a, &b, &c, &r2));
+    // a flat series has r2 = 1 when it is matched exactly
+    float flat[6] = {2, 2, 2, 2, 2, 2};
+    CHECK(FitLine(t, flat, 6, &a, &b, &r2) && Near(b, 0) && Near(r2, 1));
+    const float va[2][3] = {{1, 2, 3}, {0, 0, 0}}, vb[2][3] = {{1, 2, 7}, {0, 3, 0}};
+    CHECK(Near(RmsDiff(va, vb, 2), std::sqrt((16.0f + 9.0f) / 2)));
+  }
   std::puts("skate3_portal_math_test: ok");
   return 0;
 }

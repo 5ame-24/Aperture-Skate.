@@ -77,4 +77,12 @@ float Smoothstep(float t);
 // Yaw/pitch (forward = (sin yaw cos pitch, sin pitch, cos yaw cos pitch)) turned by R.
 void TurnYawPitch(const float R[9], double* yaw, double* pitch);
 
+// ---- Fits for the airborne probe (R5: gravity and the velocity carrier) ----
+// Least squares y = a + b t (FitLine) or y = a + b t + c t^2 (FitQuadratic) over n samples; r2 = coefficient of determination (1 = exact).
+// False when n is too small or the times are degenerate.
+bool FitLine(const float* t, const float* y, int n, float* a, float* b, float* r2);
+bool FitQuadratic(const float* t, const float* y, int n, float* a, float* b, float* c, float* r2);
+// Root mean square of |a_i - b_i| over n 3D samples.
+float RmsDiff(const float (*a)[3], const float (*b)[3], int n);
+
 }  // namespace skate3::portal_math

@@ -202,4 +202,87 @@ void TurnYawPitch(const float R[9], double* yaw, double* pitch) {
   *pitch = std::asin(std::clamp(double(o[1]), -1.0, 1.0));
 }
 
+static float R2(const float* y, const float* fit, int n) {
+  double mean = 0;
+  for (int i = 0; i < n; ++i) mean += y[i];
+  mean /= n;
+  double ss_tot = 0, ss_res = 0;
+  for (int i = 0; i < n; ++i) {
+    ss_tot += (y[i] - mean) * (y[i] - mean);
+    ss_res += (y[i] - fit[i]) * (y[i] - fit[i]);
+  }
+  return ss_tot > 1e-12 ? float(1.0 - ss_res / ss_tot) : (ss_res < 1e-12 ? 1.0f : 0.0f);
+}
+
+bool FitLine(const float* t, const float* y, int n, float* a, float* b, float* r2) {
+  if (n < 3) return false;
+  double st = 0, sy = 0, stt = 0, sty = 0;
+  for (int i = 0; i < n; ++i) {
+    st += t[i];
+    sy += y[i];
+    stt += double(t[i]) * t[i];
+    sty += double(t[i]) * y[i];
+  }
+  const double den = n * stt - st * st;
+  if (std::abs(den) < 1e-12) return false;
+  *b = float((n * sty - st * sy) / den);
+  *a = float((sy - *b * st) / n);
+  float fit[512];
+  const int m = std::min(n, 512);
+  for (int i = 0; i < m; ++i) fit[i] = *a + *b * t[i];
+  *r2 = R2(y, fit, m);
+  return true;
+}
+
+bool FitQuadratic(const float* t, const float* y, int n, float* a, float* b, float* c, float* r2) {
+  if (n < 4) return false;
+  // Normal equations about the mean time (better conditioned), solved with Cramer's rule.
+  double tm = 0;
+  for (int i = 0; i < n; ++i) tm += t[i];
+  tm /= n;
+  double s[5] = {}, r[3] = {};
+  for (int i = 0; i < n; ++i) {
+    const double x = t[i] - tm;
+    double p = 1;
+    for (int k = 0; k < 5; ++k) {
+      s[k] += p;
+      if (k < 3) r[k] += p * y[i];
+      p *= x;
+    }
+  }
+  const double M[3][3] = {{s[0], s[1], s[2]}, {s[1], s[2], s[3]}, {s[2], s[3], s[4]}};
+  auto det3 = [](const double m[3][3]) {
+    return m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1]) - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0]) +
+           m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0]);
+  };
+  const double D = det3(M);
+  if (std::abs(D) < 1e-18) return false;
+  double coef[3];
+  for (int col = 0; col < 3; ++col) {
+    double Mc[3][3];
+    for (int i = 0; i < 3; ++i) {
+      for (int j = 0; j < 3; ++j) Mc[i][j] = j == col ? r[i] : M[i][j];
+    }
+    coef[col] = det3(Mc) / D;
+  }
+  // y = c0 + c1 x + c2 x^2 with x = t - tm  ->  powers of t.
+  *c = float(coef[2]);
+  *b = float(coef[1] - 2 * coef[2] * tm);
+  *a = float(coef[0] - coef[1] * tm + coef[2] * tm * tm);
+  float fit[512];
+  const int m = std::min(n, 512);
+  for (int i = 0; i < m; ++i) fit[i] = *a + *b * t[i] + *c * t[i] * t[i];
+  *r2 = R2(y, fit, m);
+  return true;
+}
+
+float RmsDiff(const float (*a)[3], const float (*b)[3], int n) {
+  if (n <= 0) return 0.0f;
+  double sum = 0;
+  for (int i = 0; i < n; ++i) {
+    for (int k = 0; k < 3; ++k) sum += double(a[i][k] - b[i][k]) * (a[i][k] - b[i][k]);
+  }
+  return float(std::sqrt(sum / n));
+}
+
 }  // namespace skate3::portal_math
