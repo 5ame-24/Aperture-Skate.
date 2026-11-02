@@ -737,7 +737,7 @@ void CollectCubeRay(PPCContext& ctx, uint8_t* base) {
 }
 
 // PORTALFIT: a new portal's 8 rim probe rays, submitted together in one Start and collected at End. Their vectors sit below every other
-// scratch (gun 0, cube 128, blob 256): 512 + 48 k, and every call's stack starts below all of them, so no call can overwrite a ray that is
+// scratch (gun 0, cube 128): 512 + 48 k, and every call's stack starts below all of them, so no call can overwrite a ray that is
 // still queued.
 struct FitBatch {
   std::atomic<int> state{0};  // 0 idle, 1 wanted, 2 submitted

@@ -760,7 +760,7 @@ Actor offsets: +1200/+1216 ground pos, +1232 delta, +1248 velocity, +1296 flags,
       (`list A row k: "name" (ID) words ...`). That row is where a model / outfit reference next to the name should show.
     - starts from the key (UI thread) with the renderer's guest base (native_scene::g_guest_base), so it runs with the selector open (run 206:
       the selector stops skater updates, and the old scan waited for one); the skater-update path stays as a fallback.
-    Gel droppers: cut after run 207 (rolled back locally by the tester); kept behind skate3_portal_gel_dropper (off), Ctrl+H is portals <->
+    Gel droppers: rolled back after run 207 (see item 65); the code is not in this build, Ctrl+H is portals <->
     paint again.
 69. Core portal mechanics (built, untested).
     - Rolling crossings: with the hole on (default) every exit had lift 0 (gate Step: `lift = hole ? 0`), so a crossing that started
@@ -825,8 +825,6 @@ Actor offsets: +1200/+1216 ground pos, +1232 delta, +1248 velocity, +1296 flags,
       vectors within 15% of the walking velocity; one line `WALK on-foot velocity carriers ... actor+0x... n/30; skeleton+0x... n/30`. That
       store is what an on-foot portal crossing must turn and hold (Portal's on-foot flings), next round.
 
-## Roadmap
-- Item dropper: add the rolled-back gel dropper (item 65) as an item dropper, since the tester thought it was a decent item.
 74. Run 210 (bridge fling test, walk test) -> fixes (built, untested).
     - Bridge fling (fall into a floor portal, fly out of the other): the skater went "in and out" with exit speeds 0.1-0.4 m/s, 146
       crossings, 1 FLING line. A floor exit put the feet 5 cm above the floor (EXITFIX) = the riding / standing model at once, which drops
@@ -898,3 +896,6 @@ Actor offsets: +1200/+1216 ground pos, +1232 delta, +1248 velocity, +1296 flags,
     skater's own physics bodies (g_own_ids: bodies that spent 600 updates within 1.5 m of the skater) gets v(t) = v_out - g t written right
     after its rigid-body update (82AE6590), so the integrator itself flies the skater instead of stores the riding model rewrites. The result
     line adds "N body velocity writes" (0 = the skater's bodies are not known yet or not integrated there).
+
+## Roadmap
+- Item dropper: add the rolled-back gel dropper (item 65) as an item dropper, since the tester thought it was a decent item.
