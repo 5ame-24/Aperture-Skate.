@@ -34,7 +34,7 @@ with forces?); (c) whether vehicles are rigid bodies integrated by 82AE6590 (the
 ids belong to one car; (d) any existing "player in vehicle" state (none expected). A list of addresses + one paragraph per question
 is enough to start a spec-driven prototype ("possess the nearest car: steer/throttle from the pad, camera follows").
 
-## R5. Game gravity and the airborne velocity carrier  (open)
+## R5. Game gravity and the airborne velocity carrier  (measurement built, PROGRESS 57: run with the AIR probe, then `python3 tools/re/airlog.py`; a spec confirming it from the analysis side is still welcome)
 Needed by: the FLING assist (PROGRESS 55) assumes 9.81 m/s^2 and treats the board block's 7 linear rates as the skater's velocity in the air.
 Answers it: the gravity the skater's air controller integrates (m/s^2), and which state holds the airborne velocity the game integrates
 (board rates, skeleton +0x2770.. vectors, or an air-controller field), so the exit velocity can be set once in the right place instead of
@@ -55,7 +55,7 @@ Answers it: what the mod hooks (camera state, head/skeleton bones, input), which
 does about the camera during riding and in the air. Compare with our follower-mode camera in `skate3_native_scene*.cpp` and the PCAM
 logs. Written as a cleanroom summary: take the behaviour, not code.
 
-## R8. First-person camera sticks in walking mode  (open, bug)
+## R8. First-person camera sticks in walking mode  (likely cause found in our own tracking code and fixed, PROGRESS 57; confirm with a run)
 Reported by the human: occasionally, in walking mode (on foot), the first-person camera gets stuck and behaves like a second-person
 (third-person) camera. Not yet seen in logs; no PCAM or first-person lines were checked for it.
 Answers it: the first-person follower state (`skate3_native_scene*.cpp`, `UpdateFreecam` follower mode) and what switches it off while

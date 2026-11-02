@@ -9,6 +9,7 @@
 #include "generated/skate3_init.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <bit>
 #include <chrono>
@@ -70,6 +71,16 @@ REXCVAR_DEFINE_BOOL(skate3_portal_fling, true, "Skate 3",
 
 REXCVAR_DEFINE_INT32(skate3_portal_fling_frames, 10, "Skate 3",
                      "How many frames after a crossing the FLING assist holds the exit speed.")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
+REXCVAR_DEFINE_BOOL(skate3_portal_fling_skeleton, true, "Skate 3",
+                    "FLING also tops up the skeleton velocity vectors that the AIR probe found carrying the airborne velocity (only once 3+ clean "
+                    "arcs agree; until then FLING touches the board rates only).")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
+REXCVAR_DEFINE_BOOL(skate3_portal_airprobe, true, "Skate 3",
+                    "Read-only measurement (spec request R5): for each clean airborne arc, log the gravity fitted to the skater's path and how "
+                    "well each candidate velocity store (board rates, actor +1248, skeleton vectors) matches the real velocity. Log prefix AIR.")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
 REXCVAR_DEFINE_BOOL(skate3_portal_props_characters, false, "Skate 3",
@@ -819,11 +830,14 @@ void LogActor(uint8_t* base, uint32_t self, const char* when) {
 // the fall speed gone (the player loops through the pair instead of being flung, run 181). For the next N frames the board's 7 linear
 // rates are checked against the ballistic expectation v_out + g t along the exit direction and topped up when below 90% of it.
 // shortcut: gravity 9.81 m/s^2 (the game's value is not specified); only the component along the exit direction is touched.
+constexpr int kAirSkel = 26;                 // skeleton velocity vectors at +0x2770..+0x2900 (AIR probe, below)
+std::atomic<uint32_t> g_air_skel_mask{0};  // the ones AIR found moving with the skater in the air
 struct Fling {
   int left = 0, k = 0;
   float vout[3] = {}, dir[3] = {}, speed = 0;
   int64_t t0 = 0;
   int topped = 0;
+  float gravity = 9.81f;  // the AIR probe's measured value once 3+ clean arcs agree, else assumed
 };
 Fling g_fling;
 std::atomic<uint32_t> g_human_entity{0};  // the human's presentation entity (nearest skater entity to the tracked point)
@@ -848,7 +862,7 @@ void FlingFrame(uint8_t* base, uint32_t self) {
     return;
   }
   const float t = float(std::chrono::steady_clock::now().time_since_epoch().count() - f.t0) * 1e-9f;
-  const float expect[3] = {f.vout[0], f.vout[1] - 9.81f * t, f.vout[2]};
+  const float expect[3] = {f.vout[0], f.vout[1] - f.gravity * t, f.vout[2]};
   const float e_along = expect[0] * f.dir[0] + expect[1] * f.dir[1] + expect[2] * f.dir[2];
   float mean[3] = {0, 0, 0};
   int n = 0;
@@ -881,10 +895,214 @@ void FlingFrame(uint8_t* base, uint32_t self) {
       for (int c = 0; c < 3; ++c) WriteBeFloat(base, self + 1248 + 4 * c, av[c] + add * f.dir[c]);
     }
     ++f.topped;
+    const uint32_t mask = REXCVAR_GET(skate3_portal_fling_skeleton) ? g_air_skel_mask.load() : 0u;
+    uint32_t skel = 0;
+    int skel_topped = 0;
+    if (mask && ReadBe32(base, self + 1884, &skel) && skel >= 0x10000 && skel < 0xC0000000 && !(skel & 3)) {
+      for (int k = 0; k < kAirSkel; ++k) {
+        if (!(mask & (1u << k))) continue;
+        float sv[3];
+        const uint32_t a = skel + 0x2770 + 16 * k;
+        if (!ReadVec(base, a, sv)) continue;
+        const float sa = sv[0] * f.dir[0] + sv[1] * f.dir[1] + sv[2] * f.dir[2];
+        if (sa >= 0.9f * e_along) continue;
+        for (int c = 0; c < 3; ++c) WriteBeFloat(base, a + 4 * c, sv[c] + (e_along - sa) * f.dir[c]);
+        ++skel_topped;
+      }
+    }
+    if (skel_topped) REXLOG_INFO("portal-probe: FLING +{} also topped up {} skeleton vectors (learned by AIR)", f.k, skel_topped);
     REXLOG_INFO("portal-probe: FLING +{} topped up: {:.1f} -> {:.1f} m/s along the exit ({:.2f}, {:.2f}, {:.2f}), state {}", f.k, along, e_along,
                 f.dir[0], f.dir[1], f.dir[2], state);
   }
   if (f.left == 0) REXLOG_INFO("portal-probe: FLING window over after {} frames, {} top-ups", f.k, f.topped);
+}
+
+// ---- AIR probe (spec request R5, read-only): the game's gravity and the store that carries the airborne velocity ----
+// For each clean airborne arc (state 200, not riding, no portal crossing or FLING in it, no gap or jump in the tracking) every human update
+// records the tracked position and three candidate velocity stores: the mean of the board block's 7 linear rates (+0x140, stride 16), the
+// actor's world velocity (+1248) and the skeleton's 26 vectors (+0x2770..+0x2900, stride 16, the ones the teleport's skeleton reset zeroes).
+// At the end of the arc: gravity from a parabola fitted to the path, and per store the RMS error against the velocity measured from the path
+// and the gravity implied by the slope of its vertical component. The store with the smallest error is where the airborne velocity lives.
+struct AirSample {
+  float t;
+  float p[3];
+  float board[3];
+  float actor[3];
+  float skel[kAirSkel][3];
+  bool board_ok, actor_ok, skel_ok;
+};
+struct AirArc {
+  std::vector<AirSample> s;
+  int64_t t0 = 0, last_ns = 0;
+};
+AirArc g_air;
+int g_air_arcs = 0;
+std::vector<float> g_air_g;               // accepted gravity fits, newest last
+std::atomic<float> g_air_gravity{0.0f};  // median of the last accepted fits (0 = not measured yet)
+std::atomic<int> g_air_gravity_n{0};
+int64_t g_last_cross_ns = 0;
+// Skeleton vectors that moved with the skater in a clean arc (RMS against the measured velocity under max(1 m/s, 1.5 x the best store)):
+// votes per vector; the mask holds the ones with 3+ votes, which FLING then tops up too.
+int g_air_skel_votes[kAirSkel] = {};
+
+void AirFinish(const char* why) {
+  namespace pm = skate3::portal_math;
+  std::vector<AirSample> s;
+  s.swap(g_air.s);
+  // drop the take-off and landing frames (contacts still or already acting)
+  if (s.size() < 19) return;
+  s.erase(s.begin(), s.begin() + 2);
+  s.resize(s.size() - 2);
+  const int n = int(s.size());
+  std::vector<float> t(n), y(n);
+  for (int i = 0; i < n; ++i) {
+    t[i] = s[i].t;
+    y[i] = s[i].p[1];
+  }
+  float a, b, c, r2;
+  if (!pm::FitQuadratic(t.data(), y.data(), n, &a, &b, &c, &r2)) return;
+  const float g_pos = -2.0f * c;
+  // measured velocity: central differences of the path
+  const int m = n - 2;
+  std::vector<std::array<float, 3>> truth(m), cand(m);
+  for (int i = 1; i <= m; ++i) {
+    const float dt = s[i + 1].t - s[i - 1].t;
+    for (int k = 0; k < 3; ++k) truth[i - 1][k] = dt > 1e-4f ? (s[i + 1].p[k] - s[i - 1].p[k]) / dt : 0.0f;
+  }
+  struct Score {
+    char name[32];
+    float rms, g, r2;
+  };
+  std::vector<Score> scores;
+  auto score = [&](const char* name, auto get, bool ok_all) {
+    if (!ok_all) return;
+    std::vector<float> vy(m);
+    for (int i = 0; i < m; ++i) {
+      const float* v = get(s[i + 1]);
+      for (int k = 0; k < 3; ++k) cand[i][k] = v[k];
+      vy[i] = v[1];
+    }
+    Score sc{};
+    std::snprintf(sc.name, sizeof(sc.name), "%s", name);
+    sc.rms = pm::RmsDiff(reinterpret_cast<const float(*)[3]>(cand.data()), reinterpret_cast<const float(*)[3]>(truth.data()), m);
+    float la, lb, lr2;
+    sc.g = pm::FitLine(t.data() + 1, vy.data(), m, &la, &lb, &lr2) ? -lb : 0.0f;
+    sc.r2 = lr2;
+    scores.push_back(sc);
+  };
+  bool board_ok = true, actor_ok = true, skel_ok = true;
+  for (const AirSample& x : s) {
+    board_ok &= x.board_ok;
+    actor_ok &= x.actor_ok;
+    skel_ok &= x.skel_ok;
+  }
+  score("board rates", [](const AirSample& x) { return x.board; }, board_ok);
+  score("actor+1248", [](const AirSample& x) { return x.actor; }, actor_ok);
+  for (int k = 0; k < kAirSkel && skel_ok; ++k) {
+    char name[32];
+    std::snprintf(name, sizeof(name), "skeleton+0x%X", 0x2770 + 16 * k);
+    score(name, [k](const AirSample& x) { return x.skel[k]; }, true);
+  }
+  std::sort(scores.begin(), scores.end(), [](const Score& l, const Score& r) { return l.rms < r.rms; });
+  float sp0 = std::sqrt(truth[0][0] * truth[0][0] + truth[0][1] * truth[0][1] + truth[0][2] * truth[0][2]);
+  ++g_air_arcs;
+  const float y_range = *std::max_element(y.begin(), y.end()) - *std::min_element(y.begin(), y.end());
+  // State 200 also flickers on rough ground: a real arc rises or falls at least 25 cm.
+  const bool accept = r2 > 0.98f && n >= 15 && g_pos > 3.0f && g_pos < 40.0f && y_range > 0.25f;
+  if (accept && !scores.empty()) {
+    const float limit = std::max(1.0f, 1.5f * scores[0].rms);
+    uint32_t mask = 0;
+    for (const Score& sc : scores) {
+      unsigned off = 0;
+      if (sc.rms <= limit && std::sscanf(sc.name, "skeleton+0x%X", &off) == 1 && off >= 0x2770) {
+        const int k = int((off - 0x2770) / 16);
+        if (k >= 0 && k < kAirSkel && ++g_air_skel_votes[k] >= 3) mask |= 1u << k;
+      }
+    }
+    for (int k = 0; k < kAirSkel; ++k) {
+      if (g_air_skel_votes[k] >= 3) mask |= 1u << k;
+    }
+    if (mask != g_air_skel_mask.load()) {
+      g_air_skel_mask = mask;
+      REXLOG_INFO("portal-probe: AIR skeleton carriers learned: mask {:07X} ({} vectors with 3+ votes)", mask, __builtin_popcount(mask));
+    }
+  }
+  if (accept) {
+    g_air_g.push_back(g_pos);
+    if (g_air_g.size() > 9) g_air_g.erase(g_air_g.begin());
+    std::vector<float> sorted = g_air_g;
+    std::sort(sorted.begin(), sorted.end());
+    g_air_gravity = sorted[sorted.size() / 2];
+    g_air_gravity_n = int(g_air_g.size());
+  }
+  if (g_air_arcs > 60) return;
+  REXLOG_INFO("portal-probe: AIR arc #{} ({}): {:.2f} s, {} samples, start speed {:.1f} m/s; gravity from the path {:.2f} m/s^2 (r2 {:.4f}){}",
+              g_air_arcs, why, t.back() - t.front(), n, sp0, g_pos, r2, accept ? "" : " - not used (fit too poor, too short or out of range)");
+  char line[600];
+  int len = 0;
+  for (size_t i = 0; i < scores.size() && i < 5; ++i) {
+    len += std::snprintf(line + len, sizeof(line) - len, "%s%s rms %.2f m/s g %.2f (r2 %.3f)", i ? "; " : "", scores[i].name, scores[i].rms,
+                         scores[i].g, scores[i].r2);
+  }
+  for (const Score& sc : scores) {  // the two named stores always appear, even when not in the top 5
+    if ((std::strcmp(sc.name, "board rates") == 0 || std::strcmp(sc.name, "actor+1248") == 0) &&
+        std::strstr(line, sc.name) == nullptr && len < int(sizeof(line)) - 80) {
+      len += std::snprintf(line + len, sizeof(line) - len, "; %s rms %.2f m/s g %.2f", sc.name, sc.rms, sc.g);
+    }
+  }
+  REXLOG_INFO("portal-probe: AIR arc #{} carriers (best first): {}", g_air_arcs, line);
+  if (accept) {
+    REXLOG_INFO("portal-probe: AIR gravity estimate {:.2f} m/s^2 (median of {} arcs)", g_air_gravity.load(), g_air_gravity_n.load());
+  }
+}
+
+void AirProbe(uint8_t* base, uint32_t self, const float p[3], uint32_t flags) {
+  if (!REXCVAR_GET(skate3_portal_airprobe)) return;
+  const int64_t now = std::chrono::steady_clock::now().time_since_epoch().count();
+  uint32_t state = 0;
+  ReadBe32(base, self + 1336, &state);
+  const bool air = (flags & 0xF0000000u) != 0xC0000000u && state == 200 && !(flags & 0x40000000u);
+  const bool clean = air && g_fling.left == 0 && now - g_last_cross_ns > 1'000'000'000ll;
+  AirArc& arc = g_air;
+  if (!arc.s.empty()) {
+    const AirSample& last = arc.s.back();
+    const float jump = std::hypot(p[0] - last.p[0], std::hypot(p[1] - last.p[1], p[2] - last.p[2]));
+    const char* end = !air ? "landed" : !clean ? "crossing or fling" : now - arc.last_ns > 100'000'000ll ? "tracking gap" : jump > 2.0f ? "tracking jump"
+                      : arc.s.size() >= 480 ? "long arc split" : nullptr;
+    if (end) AirFinish(end);
+  }
+  if (!clean) return;
+  if (arc.s.empty()) arc.t0 = now;
+  arc.last_ns = now;
+  AirSample x{};
+  x.t = float(now - arc.t0) * 1e-9f;
+  std::copy(p, p + 3, x.p);
+  uint32_t board = 0, block = 0, skel = 0;
+  if (ReadBe32(base, self + 1880, &board) && ReadBe32(base, board + 12, &block) && block >= 0x10000 && block < 0xC0000000 && !(block & 3)) {
+    int nb = 0;
+    for (int i = 0; i < 7; ++i) {
+      float v[3];
+      if (!ReadVec(base, block + kLinRates + 16 * i, v)) continue;
+      for (int k = 0; k < 3; ++k) x.board[k] += v[k];
+      ++nb;
+    }
+    if (nb) {
+      for (float& c : x.board) c /= float(nb);
+      x.board_ok = true;
+    }
+  }
+  x.actor_ok = ReadVec(base, self + 1248, x.actor);
+  if (ReadBe32(base, self + 1884, &skel) && skel >= 0x10000 && skel < 0xC0000000 && !(skel & 3)) {
+    uint32_t raw[kAirSkel * 4];
+    if (skate3::native_scene::GuestTryCopy(raw, base + skel + 0x2770, sizeof(raw))) {
+      x.skel_ok = true;
+      for (int k = 0; k < kAirSkel; ++k) {
+        for (int c = 0; c < 3; ++c) x.skel[k][c] = BeFloat(raw[k * 4 + c]);
+        if (!std::isfinite(x.skel[k][0] + x.skel[k][1] + x.skel[k][2])) x.skel_ok = false;
+      }
+    }
+  }
+  arc.s.push_back(x);
 }
 
 // Publish the other characters (NPC skaters, pedestrians) for the hole and the prop code, and remember which entity is the human's.
@@ -921,7 +1139,12 @@ void PublishCharacters(uint8_t* base, const float human[3]) {
   }
 }
 
+// Tracking re-acquire (FPVTRACK): frames since the last crossing, its exit point, and frames without a usable position.
+int g_track_since_cross = 1000, g_track_lost = 0;
+float g_track_exit[3] = {};
+
 bool GateStep(PPCContext& ctx, uint8_t* base, uint32_t self) {
+  if (g_track_since_cross < 1000) ++g_track_since_cross;
   const uint32_t sp = ctx.r1.u32;
   static float tracked[3], last[3];
   static bool have = false;
@@ -951,7 +1174,32 @@ bool GateStep(PPCContext& ctx, uint8_t* base, uint32_t self) {
     // a teleport (it follows "nearest to the last position"), so it is only used in the air, from here.
     std::copy(place_pos, place_pos + 3, p);
   } else if (!have || !skate3::native_entity::SkaterWorldPosNear(base, tracked, 2.5f, p)) {
-    return false;  // airborne without a recent riding position to follow
+    // Lost (after a crossing `have` is cleared, or the entity moved > 2.5 m). This used to wait for a RIDING frame, which never comes on
+    // foot: the tracked point and the first-person head froze and the camera stayed behind while the skater walked on (R8). Re-acquire
+    // through the human's own presentation entity; within 30 frames of a crossing only near its exit, so a stale entity position at the
+    // entry cannot start a second crossing.
+    float q[3];
+    const uint32_t he = g_human_entity;
+    bool ok = he && skate3::native_entity::CharacterWorldPos(base, he, q);
+    if (ok && g_track_since_cross < 30) {
+      ok = std::hypot(q[0] - g_track_exit[0], std::hypot(q[1] - g_track_exit[1], q[2] - g_track_exit[2])) < 3.0f;
+    }
+    if (!ok) {
+      if (++g_track_lost == 30) {
+        REXLOG_INFO("portal-probe: FPVTRACK lost the skater for 30 frames (not riding, entity {:08X} {})", he,
+                    he ? "not usable or not near the exit yet" : "unknown");
+      }
+      return false;
+    }
+    std::copy(q, q + 3, p);
+    static int logged = 0;
+    if (logged++ < 40) {
+      REXLOG_INFO("portal-probe: FPVTRACK re-acquired the skater through its entity at ({:.2f}, {:.2f}, {:.2f}) after {} lost frames, flags {:08X}",
+                  p[0], p[1], p[2], g_track_lost, flags);
+    }
+    g_track_lost = 0;
+  } else {
+    g_track_lost = 0;
   }
   std::copy(p, p + 3, tracked);
   // Speed of the tracked position, logged for ~48 frames after a crossing.
@@ -1110,6 +1358,7 @@ bool GateStep(PPCContext& ctx, uint8_t* base, uint32_t self) {
       skate3::portal_cube::Step(cdt, p, cap, hand);
     }
   }
+  AirProbe(base, self, p, flags);
   std::copy(p, p + 3, last);
   have = true;
   const float speed_before = speed_now;
@@ -1132,6 +1381,8 @@ bool GateStep(PPCContext& ctx, uint8_t* base, uint32_t self) {
   // jump itself read as a 30+ m/s speed.
   std::copy(cross.exit_pos, cross.exit_pos + 3, tracked);
   std::copy(cross.exit_pos, cross.exit_pos + 3, last);
+  std::copy(cross.exit_pos, cross.exit_pos + 3, g_track_exit);
+  g_track_since_cross = 0;
   // Velocity in: the tracked (horizontal) displacement. Out: the pair's matrix applied to it. Facing after the
   // crossing = the horizontal direction of the velocity that leaves. board/block are only read for the SCAN log.
   uint32_t board = 0, block = 0;
@@ -1203,6 +1454,7 @@ bool GateStep(PPCContext& ctx, uint8_t* base, uint32_t self) {
   }
   const float target[16] = {hz, 0, -hx, 0, 0, 1, 0, 0, hx, 0, hz, 0, cross.exit_pos[0], feet_y, cross.exit_pos[2], 1};
   const bool ok = ArmTeleport(base, sp, self, flags, target);
+  if (ok) g_last_cross_ns = std::chrono::steady_clock::now().time_since_epoch().count();
   if (ok && REXCVAR_GET(skate3_portal_fling)) {
     float vo[3];
     Turn(cross.vel, vel3, vo);
@@ -1216,8 +1468,11 @@ bool GateStep(PPCContext& ctx, uint8_t* base, uint32_t self) {
         g_fling.vout[c] = g_fling.dir[c] * g_fling.speed;
       }
       g_fling.t0 = std::chrono::steady_clock::now().time_since_epoch().count();
-      REXLOG_INFO("portal-probe: FLING armed: v_in ({:.1f}, {:.1f}, {:.1f}) -> v_out ({:.1f}, {:.1f}, {:.1f}) {:.1f} m/s for {} frames", vel3[0],
-                  vel3[1], vel3[2], g_fling.vout[0], g_fling.vout[1], g_fling.vout[2], g_fling.speed, g_fling.left);
+      const bool measured = g_air_gravity_n.load() >= 3;
+      if (measured) g_fling.gravity = g_air_gravity.load();
+      REXLOG_INFO("portal-probe: FLING armed: v_in ({:.1f}, {:.1f}, {:.1f}) -> v_out ({:.1f}, {:.1f}, {:.1f}) {:.1f} m/s for {} frames, gravity {:.2f} ({})",
+                  vel3[0], vel3[1], vel3[2], g_fling.vout[0], g_fling.vout[1], g_fling.vout[2], g_fling.speed, g_fling.left, g_fling.gravity,
+                  measured ? "measured by AIR" : "assumed");
     } else {
       REXLOG_INFO("portal-probe: FLING not armed: exit speed {:.1f} m/s (too slow to hold)", sp_out);
     }
@@ -1815,7 +2070,6 @@ extern "C" REX_FUNC(sub_82DB88C8) {
     g_recover_window = 300;
     LogActor(base, self, "after the teleport");
   }
-  if (self == g_human && !gate_armed) FlingFrame(base, self);
   if (self == g_human && g_onboard_frames > 0) {
     ForceOnBoard(base, self, "after the frame");
     --g_onboard_frames;
@@ -1841,6 +2095,8 @@ extern "C" REX_FUNC(sub_82DB88C8) {
     ++g_replay_total;
     --g_replay_left;
   }
+  // after the restore replay above, which rewrites the skeleton vectors with their pre-crossing (turned) values for a few frames
+  if (self == g_human && !gate_armed) FlingFrame(base, self);
   if (t_move_pending) {
     t_move_pending = false;
     uint32_t board = 0, block = 0;

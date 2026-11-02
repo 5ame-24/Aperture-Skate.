@@ -34,7 +34,8 @@ for line in open(path, errors="replace"):
         m = re.search(r"NPCX actor (\w+) after crossing t\+(\d+).*?([\d.]+) m from the exit, speed ([\d.]+) m/s \(in ([\d.]+)\)", line)
         if m:
             follows[m.group(1)].append((int(m.group(2)), float(m.group(3)), float(m.group(4)), float(m.group(5))))
-    for tag in ("FLING armed", "FLING not armed", "topped up", "FLING +", "EXITFIX", "portal-props: CHAR", "HOLE kept solid", "sinking through the opening", "CHARS "):
+    for tag in ("FLING armed", "FLING not armed", "topped up", "FLING +", "EXITFIX", "portal-props: CHAR", "HOLE kept solid", "sinking through the opening", "CHARS ",
+                "AIR arc", "AIR gravity estimate", "AIR skeleton carriers learned", "also topped up", "FPVTRACK re-acquired", "FPVTRACK lost"):
         if tag in line:
             other[tag] += 1
     if "PCAM" in line:

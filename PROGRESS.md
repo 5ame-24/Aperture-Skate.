@@ -588,4 +588,24 @@ Actor offsets: +1200/+1216 ground pos, +1232 delta, +1248 velocity, +1296 flags,
     `--skate3_portal_fling=false`). `skate3_portal_npc` and `skate3_portal_camcarry` stay OFF until their round. The always-on fixes of
     section 55 (characters not props, EXITFIX, sinking crossing) are unchanged. Spec requests R6-R8 (backwards-man speed, first-person mod,
     first person sticking on foot) are with the analysis side; nothing built for them.
+57. R5 from the implementation side (built, untested): measure it instead of asking for it.
+    - `AIR` probe (cvar `skate3_portal_airprobe`, default ON, read-only): every clean airborne arc of the human (state 200, not riding, no
+      recovery flag, no crossing in the last 1 s, no FLING window, no tracking gap/jump) records per update the tracked position and three
+      candidate velocity stores: mean board linear rates, actor +1248, the 26 skeleton vectors +0x2770..+0x2900. At the end (landing etc.,
+      first/last 2 samples dropped, >= 15 left): gravity = -2c of a parabola fitted to y(t) (`portal_math::FitQuadratic`, tested), and per store
+      the RMS error against the path's central-difference velocity plus the gravity of its v_y slope (`FitLine`). Accepted arcs (r2 > 0.98,
+      g 3..40, y range > 0.25 m) feed a median gravity estimate.
+      Logs: `AIR arc #N (why): T s, n samples, start speed; gravity from the path G (r2)`, `AIR arc #N carriers (best first): ...`,
+      `AIR gravity estimate G (median of N arcs)`, `AIR skeleton carriers learned: mask M`.
+      `python3 tools/re/airlog.py [log]` prints the answer to R5 and a draft spec paragraph (to check, then docs/specs/).
+    - FLING uses the measured gravity once 3+ arcs are accepted (`gravity G (measured by AIR | assumed)` in `FLING armed`), and with
+      `skate3_portal_fling_skeleton` (default ON) also tops up the skeleton vectors AIR found moving with the skater (3+ votes: RMS under
+      max(1 m/s, 1.5 x the best store) in an accepted arc) - "set the exit velocity in the store that carries it". `FLING +k also topped up N
+      skeleton vectors`. FlingFrame now runs after the skeleton-restore replay (which rewrote those vectors each frame).
+    - R8 (first person stuck on foot), in our own code: after a crossing (or losing the entity) `GateStep` waited for a RIDING frame to
+      track again, which never comes on foot, so the tracked point and the first-person head froze. Now it re-acquires through the human's
+      presentation entity (`g_human_entity`, from PublishCharacters), within 30 frames of a crossing only within 3 m of its exit.
+      Logs: `FPVTRACK re-acquired the skater through its entity ... after N lost frames`, `FPVTRACK lost the skater for 30 frames`.
+      Side effect to watch: tracking (and therefore crossings, the gun origin, the cube's hand point) now resumes in the air right after a
+      crossing instead of at the next landing.
 
