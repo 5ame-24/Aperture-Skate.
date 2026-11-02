@@ -54,3 +54,10 @@ game's camera and skater model are driven from outside.
 Answers it: what the mod hooks (camera state, head/skeleton bones, input), which game functions or fields it writes, and what it
 does about the camera during riding and in the air. Compare with our follower-mode camera in `skate3_native_scene*.cpp` and the PCAM
 logs. Written as a cleanroom summary: take the behaviour, not code.
+
+## R8. First-person camera sticks in walking mode  (open, bug)
+Reported by the human: occasionally, in walking mode (on foot), the first-person camera gets stuck and behaves like a second-person
+(third-person) camera. Not yet seen in logs; no PCAM or first-person lines were checked for it.
+Answers it: the first-person follower state (`skate3_native_scene*.cpp`, `UpdateFreecam` follower mode) and what switches it off while
+walking: which state or flag the game's on-foot camera takes over, and whether a crossing or the Esc menu leaves the follower stale.
+Needed: a run with first person on foot, plus the `PCAM` "first person turned" lines and the first-person state at the moment it sticks.
