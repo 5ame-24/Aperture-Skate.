@@ -1,15 +1,20 @@
 #!/usr/bin/env python3
-"""Read the Portal gun view model from the user's own Portal 2 install and write a small local cache for the mod.
+"""Read a model (the Portal gun view model, or a Portal 2 character) from the user's own Portal 2 install and write a small local cache.
 
-usage: portalgun_extract.py [portal2_dir] [out.bin] [--preview prefix]
+usage: portalgun_extract.py [portal2_dir] [out.bin] [--preview prefix] [--character chell|atlas|pbody|all]
   portal2_dir  folder holding pak01_dir.vpk (default: the macOS Steam install)
-  out.bin      default ~/Library/Application Support/Skate3PortalMod/portalgun.bin
+  out.bin      default ~/Library/Application Support/Skate3PortalMod/portalgun.bin (or <character>.bin with --character)
+  --character  a player model with its skeleton and skin weights: chell (models/player/chell/player), atlas (models/player/ballbot/*),
+               pbody (models/player/eggbot/*); "all" writes all three. Lists the candidate .mdl files it chose from.
 Nothing is bundled: the cache is derived on the user's machine from their own copy.
 
-Cache format (little endian): "PGUN" u32 version=1, u32 ntex, u32 nmesh;
+Cache format (little endian): "PGUN" u32 version (1 or 2), u32 ntex, u32 nmesh;
   per texture: u32 w, u32 h, w*h*4 RGBA bytes;
-  per mesh: u32 tex_index (0xFFFFFFFF = none), u32 nverts (multiple of 3), nverts * 8 floats (x y z nx ny nz u v).
-Positions are Source model space (x forward, y left, z up, inches)."""
+  per mesh: u32 tex_index (0xFFFFFFFF = none), u32 nverts (multiple of 3), nverts * 8 floats (x y z nx ny nz u v);
+    version 2 only: then nverts * 16 bytes of skin: 3 x u8 bone, u8 bone count, 3 x f32 weight;
+  version 2 only, after the meshes: u32 nbones, per bone: 32 bytes name (NUL padded), i32 parent, 12 x f32 bone -> model matrix (three
+    rows [R | t], the inverse of the model's pose-to-bone matrix: the bind pose the skin weights were made for).
+Positions are the model's own space (the player models: y up, inches)."""
 import os, struct, sys, zlib, math
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -151,7 +156,10 @@ def parse_model(mdl, vvd, vtx, lod=0):
     nlod0 = u32(vvd, 16 + 4 * lod)
     def vert(i):
         o = vdata + 48 * i
-        return struct.unpack_from('<8f', vvd, o + 16)  # position(3) normal(3) uv(2)
+        # position(3) normal(3) uv(2), then the skin: weights(3), bones(3), bone count (studio vertex: weights at +0, bones at +12, count +15)
+        w = struct.unpack_from('<3f', vvd, o)
+        b = struct.unpack_from('<3B', vvd, o + 12)
+        return struct.unpack_from('<8f', vvd, o + 16) + (b, vvd[o + 15], w)
     lod0 = []
     if nfix == 0:
         lod0 = [vert(i) for i in range(nlod0)]
@@ -204,6 +212,47 @@ def parse_model(mdl, vvd, vtx, lod=0):
     return meshes
 
 
+def parse_bones(mdl):
+    """(name, parent, bone->model 3x4 rows) per bone. mstudiobone_t is 216 bytes: name offset +0, parent +4, poseToBone (3x4) at +96."""
+    nbones, bidx = u32(mdl, 156), u32(mdl, 160)
+    out = []
+    for i in range(nbones):
+        o = bidx + 216 * i
+        name = cstr(mdl, o + i32(mdl, o))
+        parent = i32(mdl, o + 4)
+        m = struct.unpack_from('<12f', mdl, o + 96)  # model -> bone
+        r = [[m[0], m[1], m[2]], [m[4], m[5], m[6]], [m[8], m[9], m[10]]]
+        t = [m[3], m[7], m[11]]
+        a, b, c = r[0]; d, e, f = r[1]; g, h, k = r[2]
+        A, B, C = e * k - f * h, -(d * k - f * g), d * h - e * g
+        det = a * A + b * B + c * C
+        if abs(det) < 1e-12:
+            inv = [[1, 0, 0], [0, 1, 0], [0, 0, 1]]
+        else:
+            inv = [[A / det, -(b * k - c * h) / det, (b * f - c * e) / det],
+                   [B / det, (a * k - c * g) / det, -(a * f - c * d) / det],
+                   [C / det, -(a * h - b * g) / det, (a * e - b * d) / det]]
+        tt = [-(inv[j][0] * t[0] + inv[j][1] * t[1] + inv[j][2] * t[2]) for j in range(3)]
+        out.append((name, parent, [inv[0][0], inv[0][1], inv[0][2], tt[0], inv[1][0], inv[1][1], inv[1][2], tt[1],
+                                    inv[2][0], inv[2][1], inv[2][2], tt[2]]))
+    return out
+
+
+CHARACTERS = {'chell': ('models/player/chell/', 'player'), 'atlas': ('models/player/ballbot/', 'ballbot'),
+              'pbody': ('models/player/eggbot/', 'eggbot')}
+
+
+def pick_model(vpk, character):
+    folder, prefer = CHARACTERS[character]
+    cands = sorted(n[:-4] for n in vpk.index if n.startswith(folder) and n.endswith('.mdl'))
+    print(character, 'candidates:', cands)
+    for c in cands:
+        if c.endswith('/' + prefer):
+            return c
+    # otherwise the largest model in the folder (the full body, not a gib or an arm)
+    return max(cands, key=lambda c: vpk.index[c + '.mdl'][2]) if cands else None
+
+
 def png_write(path, w, h, rgb):
     raw = b''.join(b'\0' + bytes(rgb[y * w * 3:(y + 1) * w * 3]) for y in range(h))
     def chunk(t, d): return struct.pack('>I', len(d)) + t + d + struct.pack('>I', zlib.crc32(t + d) & 0xFFFFFFFF)
@@ -254,18 +303,32 @@ def preview(prefix, meshes, textures, size=360):
         print('wrote %s_%s.png' % (prefix, name))
 
 
-def main():
-    args = [a for a in sys.argv[1:]]
-    prev = None
-    if '--preview' in args:
-        i = args.index('--preview'); prev = args[i + 1]; del args[i:i + 2]
-    d = args[0] if args else DEFAULT_DIR
-    out = args[1] if len(args) > 1 else os.path.expanduser('~/Library/Application Support/Skate3PortalMod/portalgun.bin')
-    vpk = Vpk(d)
-    base = os.environ.get('MODEL', 'models/weapons/v_portalgun')
+def write_cache(out, keep, textures, bones=None):
+    names = sorted({m for m, _, _ in keep if m in textures})
+    os.makedirs(os.path.dirname(out) or '.', exist_ok=True)
+    with open(out, 'wb') as f:
+        f.write(b'PGUN' + struct.pack('<III', 2 if bones is not None else 1, len(names), len(keep)))
+        for n in names:
+            w, h, px = textures[n]
+            f.write(struct.pack('<II', w, h) + px)
+        for m, _, t in keep:
+            f.write(struct.pack('<II', names.index(m) if m in names else 0xFFFFFFFF, len(t)))
+            for v in t:
+                f.write(struct.pack('<8f', *v[:8]))
+            if bones is not None:
+                for v in t:
+                    b, n, w = v[8], v[9], v[10]
+                    f.write(struct.pack('<4B3f', b[0], b[1], b[2], max(1, min(3, n)), *w))
+        if bones is not None:
+            f.write(struct.pack('<I', len(bones)))
+            for name, parent, m in bones:
+                f.write(name.encode('latin1')[:31].ljust(32, b'\0') + struct.pack('<i12f', parent, *m))
+    print('wrote', out, os.path.getsize(out), 'bytes', '' if bones is None else '(%d bones)' % len(bones))
+
+
+def extract(vpk, base, out, prev, skip_default, lod, with_bones):
     mdl, vvd = vpk.read(base + '.mdl'), vpk.read(base + '.vvd')
     vtx = vpk.read(base + '.dx90.vtx') if (base + '.dx90.vtx') in vpk.index else vpk.read(base + '.vtx')
-    lod = int(os.environ.get('GUN_LOD', '2'))
     meshes = parse_model(mdl, vvd, vtx, lod)
     print('meshes:', [(m, len(t) // 3) for m, _, t in meshes])
     textures, mats = {}, {}
@@ -294,23 +357,47 @@ def main():
             except Exception as e:
                 print('  texture failed:', e)
         mats[mat] = base_tex
-    skip = tuple(os.environ.get('SKIP', 'hand,arm,sleeve,glove,potato').split(',')) if os.environ.get('SKIP', 'x') != '' else ()
-    keep = [(m, cd, t) for m, cd, t in meshes if not (m and any(s in m for s in skip))]
+    skip_env = os.environ.get('SKIP', skip_default)
+    skip = tuple(x for x in skip_env.split(',') if x)
+    keep = [(m, cd, t) for m, cd, t in meshes if not (m and any(sk in m for sk in skip))]
     print('kept meshes:', [(m, len(t) // 3) for m, _, t in keep])
     if prev:
         preview(prev, keep, textures)
-    names = sorted({m for m, _, _ in keep if m in textures})
-    os.makedirs(os.path.dirname(out), exist_ok=True)
-    with open(out, 'wb') as f:
-        f.write(b'PGUN' + struct.pack('<III', 1, len(names), len(keep)))
-        for n in names:
-            w, h, px = textures[n]
-            f.write(struct.pack('<II', w, h) + px)
-        for m, _, t in keep:
-            f.write(struct.pack('<II', names.index(m) if m in names else 0xFFFFFFFF, len(t)))
-            for v in t:
-                f.write(struct.pack('<8f', *v))
-    print('wrote', out, os.path.getsize(out), 'bytes')
+    bones = parse_bones(mdl) if with_bones else None
+    if bones:
+        print('bones:', len(bones), [b[0] for b in bones[:12]], '...')
+        used = {bi for _, _, t in keep for v in t for bi, k in zip(v[8], range(v[9]))}
+        print('bones used by the skin:', len(used))
+    write_cache(out, keep, textures, bones)
+
+
+def main():
+    args = [a for a in sys.argv[1:]]
+    prev = None
+    if '--preview' in args:
+        i = args.index('--preview'); prev = args[i + 1]; del args[i:i + 2]
+    character = None
+    if '--character' in args:
+        i = args.index('--character'); character = args[i + 1].lower(); del args[i:i + 2]
+    d = args[0] if args else DEFAULT_DIR
+    vpk = Vpk(d)
+    cache_dir = os.path.expanduser('~/Library/Application Support/Skate3PortalMod')
+    if character:
+        todo = list(CHARACTERS) if character == 'all' else [character]
+        for c in todo:
+            if c not in CHARACTERS:
+                sys.exit('unknown character %r (chell, atlas, pbody, all)' % c)
+            base = os.environ.get('MODEL') if (os.environ.get('MODEL') and len(todo) == 1) else pick_model(vpk, c)
+            if not base:
+                print(c, ': no model found in the VPK, skipped')
+                continue
+            out = args[1] if (len(args) > 1 and len(todo) == 1) else os.path.join(cache_dir, c + '.bin')
+            print('==', c, base, '->', out)
+            extract(vpk, base, out, prev and prev + '_' + c, '', int(os.environ.get('GUN_LOD', '2')), True)  # LOD 2: the renderer's per-frame vertex space is small
+        return
+    out = args[1] if len(args) > 1 else os.path.join(cache_dir, 'portalgun.bin')
+    base = os.environ.get('MODEL', 'models/weapons/v_portalgun')
+    extract(vpk, base, out, prev, 'hand,arm,sleeve,glove,potato', int(os.environ.get('GUN_LOD', '2')), False)
 
 
 if __name__ == '__main__':

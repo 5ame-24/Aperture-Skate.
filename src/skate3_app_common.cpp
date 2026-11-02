@@ -696,8 +696,10 @@ void Skate3BaseApp::OnCreateDialogs(rex::ui::ImGuiDrawer* drawer) {
                         [] { skate3::portal_cube::RequestSpawn(); });
   rex::ui::RegisterBind("bind_skate3_portal_grindcapture", "Ctrl+8", "Portal gate: log the game's grind probes for 8 s",
                         [] { skate3::portal_gate::RequestGrindCapture(); });
-  rex::ui::RegisterBind("bind_skate3_portal_chell", "Ctrl+0", "Portal gate: Chell in place of the skater (experimental)",
+  rex::ui::RegisterBind("bind_skate3_portal_chell", "Ctrl+0", "Portal characters: you become Chell / Atlas / P-body / yourself (cycles)",
                         [] { skate3::portal_chell::Toggle(); });
+  rex::ui::RegisterBind("bind_skate3_portal_coop", "Ctrl+Shift+0", "Portal characters: co-op on/off (the two nearest NPCs become Atlas and P-body)",
+                        [] { skate3::portal_chell::ToggleCoop(); });
   rex::ui::RegisterBind("bind_skate3_portal_adopt", "Ctrl+9", "Portal gate: make the nearest game prop the companion cube (again: release it)",
                         [] { skate3::portal_gate::RequestAdopt(); });
   rex::ui::RegisterBind("bind_skate3_portal_wake", "Ctrl+7", "Portal gate: wake the sleeping props around the skater",

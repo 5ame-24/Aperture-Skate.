@@ -348,6 +348,13 @@ void SetCharacterPositions(const float (*p)[3], int n) {
   for (int i = 0; i < g_char_n; ++i) std::copy(p[i], p[i] + 3, g_chars[i]);
 }
 
+int CharacterPositions(float (*out)[3], int max) {
+  std::lock_guard<std::mutex> lock(g_mutex);
+  const int n = std::min(max, g_char_n);
+  for (int i = 0; i < n; ++i) std::copy(g_chars[i], g_chars[i] + 3, out[i]);
+  return n;
+}
+
 static bool NearCharacterLocked(const float p[3], float radius) {
   for (int i = 0; i < g_char_n; ++i) {
     const float d[3] = {p[0] - g_chars[i][0], p[1] - g_chars[i][1], p[2] - g_chars[i][2]};

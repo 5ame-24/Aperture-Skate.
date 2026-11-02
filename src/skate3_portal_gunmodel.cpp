@@ -3,6 +3,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <mutex>
 #include <string>
 #include <unordered_map>
 
@@ -22,10 +23,10 @@ struct Slot {
   Model model;
   bool tried = false, ok = false;
 };
-Slot g_gun, g_chell;
+Slot g_gun, g_chars[kCharacters];
 
 // Merge identical vertices so a mesh can be drawn indexed (the renderer's per-frame vertex space is only 1 MiB).
-void Index(const std::vector<float>& raw, Mesh& m) {
+void Index(const std::vector<float>& raw, Mesh& m, const std::vector<Skin>* raw_skin = nullptr) {
   struct Key {
     uint32_t w[8];
     bool operator==(const Key& o) const { return std::memcmp(w, o.w, sizeof(w)) == 0; }
@@ -49,6 +50,7 @@ void Index(const std::vector<float>& raw, Mesh& m) {
     if (it == seen.end()) {
       it = seen.emplace(k, uint16_t(m.vtx.size() / 8)).first;
       m.vtx.insert(m.vtx.end(), raw.begin() + i * 8, raw.begin() + i * 8 + 8);
+      if (raw_skin) m.skin.push_back((*raw_skin)[i]);  // same position, normal and uv = the same source vertex, the same weights
     }
     m.idx.push_back(it->second);
   }
@@ -60,7 +62,8 @@ bool Load(const std::string& path, Model& model) {
   auto rd = [&](void* p, size_t n) { return bool(f.read(static_cast<char*>(p), std::streamsize(n))); };
   char magic[4];
   uint32_t head[3];
-  if (!rd(magic, 4) || std::memcmp(magic, "PGUN", 4) != 0 || !rd(head, sizeof(head)) || head[0] != 1 || head[1] > 8 || head[2] > 64) return false;
+  if (!rd(magic, 4) || std::memcmp(magic, "PGUN", 4) != 0 || !rd(head, sizeof(head)) || (head[0] != 1 && head[0] != 2) || head[1] > 8 || head[2] > 64) return false;
+  const bool v2 = head[0] == 2;
   model.tex.resize(head[1]);
   for (Tex& t : model.tex) {
     uint32_t wh[2];
@@ -78,12 +81,38 @@ bool Load(const std::string& path, Model& model) {
     m.tex = th[0];
     std::vector<float> raw(size_t(th[1]) * 8);
     if (!rd(raw.data(), raw.size() * sizeof(float))) return false;
-    Index(raw, m);
+    if (!v2) {
+      Index(raw, m);
+      continue;
+    }
+    std::vector<Skin> skin(th[1]);
+    for (Skin& k : skin) {
+      uint8_t b[4];
+      if (!rd(b, 4) || !rd(k.weight, sizeof(k.weight))) return false;
+      std::memcpy(k.bone, b, 3);
+      k.count = uint8_t(b[3] < 1 ? 1 : b[3] > 3 ? 3 : b[3]);
+    }
+    Index(raw, m, &skin);
+  }
+  if (v2) {
+    uint32_t nb = 0;
+    if (!rd(&nb, 4) || nb == 0 || nb > 256) return false;
+    model.bones.resize(nb);
+    for (BoneDef& b : model.bones) {
+      if (!rd(b.name, 32) || !rd(&b.parent, 4) || !rd(b.rest, sizeof(b.rest))) return false;
+      b.name[31] = 0;
+    }
+    for (const Mesh& m : model.mesh)
+      for (const Skin& k : m.skin)
+        for (int j = 0; j < k.count; ++j)
+          if (k.bone[j] >= nb) return false;
   }
   return true;
 }
 
 const Model* Fetch(Slot& slot, const char* what, const char* file, const char* cvar_path) {
+  static std::mutex mutex;  // the render thread and the key binds (character cycling) both ask
+  std::lock_guard<std::mutex> lock(mutex);
   if (!slot.tried) {
     slot.tried = true;
     std::string path = cvar_path;
@@ -95,8 +124,9 @@ const Model* Fetch(Slot& slot, const char* what, const char* file, const char* c
     if (slot.ok) {
       size_t tris = 0, verts = 0;
       for (const Mesh& m : slot.model.mesh) tris += m.idx.size() / 3, verts += m.vtx.size() / 8;
-      REXLOG_INFO("portal-gun: loaded the {} from '{}' ({} meshes, {} triangles, {} unique vertices, {} textures)", what, path, slot.model.mesh.size(), tris,
-                  verts, slot.model.tex.size());
+      REXLOG_INFO("portal-gun: loaded the {} from '{}' ({} meshes, {} triangles, {} unique vertices, {} textures, {} bones{})", what, path,
+                  slot.model.mesh.size(), tris, verts, slot.model.tex.size(), slot.model.bones.size(),
+                  slot.model.bones.empty() ? ": version 1 cache, no skeleton; re-run portalgun_extract.py --character" : "");
     } else {
       REXLOG_INFO("portal-gun: no {} cache at '{}' (run tools/re/portalgun_extract.py)", what, path);
     }
@@ -106,6 +136,24 @@ const Model* Fetch(Slot& slot, const char* what, const char* file, const char* c
 }  // namespace
 
 const Model* Get() { return Fetch(g_gun, "Portal gun model", "portalgun.bin", REXCVAR_GET(skate3_portal_gun_cache).c_str()); }
-const Model* GetChell() { return Fetch(g_chell, "Chell model", "chell.bin", REXCVAR_GET(skate3_portal_chell_cache).c_str()); }
+const char* CharacterName(int c) {
+  static const char* kNames[kCharacters] = {"chell", "atlas", "pbody"};
+  return c >= 0 && c < kCharacters ? kNames[c] : "none";
+}
+
+int CharacterFromName(const char* name) {
+  for (int c = 0; c < kCharacters; ++c)
+    if (std::strcmp(name, CharacterName(c)) == 0) return c;
+  return -1;
+}
+
+const Model* GetCharacter(int c) {
+  if (c < 0 || c >= kCharacters) return nullptr;
+  static const char* kWhat[kCharacters] = {"Chell model", "Atlas model", "P-body model"};
+  static const char* kFile[kCharacters] = {"chell.bin", "atlas.bin", "pbody.bin"};
+  return Fetch(g_chars[c], kWhat[c], kFile[c], c == kChell ? REXCVAR_GET(skate3_portal_chell_cache).c_str() : "");
+}
+
+const Model* GetChell() { return GetCharacter(kChell); }
 
 }  // namespace skate3::portal_gun

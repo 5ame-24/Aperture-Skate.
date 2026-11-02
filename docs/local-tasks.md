@@ -82,3 +82,10 @@ files (portal_math gets a setter `SetSizeScale(float)` the gate calls each frame
 Behaviour at 1.0 must be identical. Note in the cvar help: Portal's own portal is 1.63 x 2.74 m (half 0.81 x 1.37), i.e. tall, not wide.
 Check: build passes; unit tests pass; in game `--skate3_portal_gate_size=0.5` draws and crosses half-size portals.
 
+
+## T8. Extract the Portal 2 characters (run on the Mac, no code change) — model: Haiku 5.5
+Run: `python3 tools/re/portalgun_extract.py --character all --preview /tmp/char`
+Writes ~/Library/Application Support/Skate3PortalMod/{chell,atlas,pbody}.bin (cache version 2: mesh, textures, skeleton, skin weights) and
+/tmp/char_<name>_{side,top,front}.png previews. Paste back: the `candidates`, `kept meshes`, `bones: N [...]`, `bones used by the skin`
+and `wrote ...` lines for each character, and look at the three front previews (a standing figure, not empty or exploded).
+If a character fails (model not found, "strip group layout not recognised"), paste the error: nothing in the game changes.

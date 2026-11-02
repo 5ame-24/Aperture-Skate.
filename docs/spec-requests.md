@@ -67,3 +67,13 @@ Needed by: FLING and AIR for walking/jumping crossings (PROGRESS 59: FLING is of
 Answers it: which player state(s) and flags an on-foot jump uses (the `AIR off-board updates ... by state/flags` line gives a first answer
 at runtime), and where the walking character's velocity lives (actor field, character controller), so an exit velocity can be applied on foot.
 
+
+## R10. Skate 3's own character slots and skeleton  (open; the Portal characters work without it)
+Needed by: Portal 2 characters as real game characters (PROGRESS 62). Today they are drawn by us in place of a skater's skinned parts and
+driven by that skater's bone palettes; the game still thinks the skater is its own character.
+Answers it:
+- the skater skeleton: bone names and hierarchy (rig data in game/data, or the skeleton object the palettes come from), and which palette
+  index of each skinned part is which bone. With that, our bone map is exact instead of matched by geometry.
+- the character slots: where Create-a-Skater / the character select keeps its list of characters (a table of models, rigs and outfits), so a
+  Portal character could be listed as a selectable character, and how NPC skaters pick theirs.
+- the rest pose the skin palettes are relative to (bind pose), measured once from a palette vs the captured rest vertices.

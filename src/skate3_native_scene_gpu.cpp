@@ -4124,7 +4124,7 @@ bool EnsureFallbackTextures(const NativeGuestOutputRenderContext& context) {
     }
   };
   upload_model_textures(skate3::portal_gun::Get(), g_r.gun_tex);
-  upload_model_textures(skate3::portal_gun::GetChell(), g_r.chell_tex);
+  for (int c = 0; c < skate3::portal_gun::kCharacters; ++c) upload_model_textures(skate3::portal_gun::GetCharacter(c), g_r.character_tex[c]);
   return true;
 }
 
@@ -10532,46 +10532,60 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
     for (int k = 0; k < 3; ++k) c[k] = lc[0] * it->world[k] + lc[1] * it->world[4 + k] + lc[2] * it->world[8 + k] + it->world[12 + k];
     return skate3::portal_cube::HidesItemAt(c);
   };
-  // Chell: the skater's own skinned parts this frame (palette root near the tracked skater), Build once, hide the skater's items, draw her.
-  std::vector<skate3::portal_chell::Palette> chell_pals;
-  std::unordered_set<uint32_t> chell_entities, chell_meshes;
+  // Portal 2 characters (skate3_portal_chell), one per slot (0 = you, 1-2 = co-op NPCs): the slot's skater's own skinned parts this frame
+  // (palette root near the slot's target), Build once per slot and character, hide that skater's items, draw the character's own model.
+  struct CharDraw {
+    bool on = false;
+    std::vector<skate3::portal_chell::Palette> pals;
+    std::unordered_set<uint32_t> entities, meshes;
+  };
+  CharDraw char_draw[skate3::portal_chell::kSlots];
   bool chell_on = false;
   if (use_depth && debug_mode == 0 && !loading_native && skate3::portal_chell::Wanted()) {
-    float sk[3];
-    if (skate3::portal_gate::TrackedPos(sk)) {
-      // The skater's parts: the first Build takes the skinned parts within 1.8 m of the tracked point (each part has its own palette root, so
-      // there is no shared skeleton root to match). After that only those same meshes count, so NPCs walking close keep their own look.
+    std::unordered_set<uint32_t> claimed;  // a skinned mesh belongs to one slot only (you first)
+    for (int slot = 0; slot < skate3::portal_chell::kSlots; ++slot) {
+      CharDraw& cd = char_draw[slot];
+      float sk[3];
+      if (!skate3::portal_chell::SlotActive(slot) || !skate3::portal_chell::SlotTarget(slot, sk)) continue;
+      const float radius = skate3::portal_chell::SlotRadius(slot);
+      const bool ready = skate3::portal_chell::Ready(slot);
+      // The skater's parts: the first Build takes the skinned parts within `radius` of the target (each part has its own palette root, so
+      // there is no shared skeleton root to match). After that only those same meshes count, still near the target, so another skater
+      // walking close keeps their own look.
       const auto consider = [&](const DrawItem* it) {
         if (!it->skinned || it->bones.size() < 12 || !skate3::portal_chell::Captured(it->mesh) || skate3::portal_chell::IsBoard(it->mesh)) return;
+        if (claimed.count(it->mesh) != 0 && cd.meshes.count(it->mesh) == 0) return;
         const float* b = it->bones.data();
         const float d[3] = {b[3] - sk[0], b[7] - sk[1], b[11] - sk[2]};
         const float d2 = d[0] * d[0] + d[1] * d[1] + d[2] * d[2];
-        if (skate3::portal_chell::Ready()) {
-          if (!skate3::portal_chell::IsPart(it->mesh)) {
+        if (ready) {
+          if (!skate3::portal_chell::IsPart(slot, it->mesh)) {
             static std::unordered_set<uint32_t> logged;
-            if (d2 < 1.5f * 1.5f && logged.size() < 40 && logged.insert(it->mesh).second)
+            if (slot == 0 && d2 < 1.5f * 1.5f && logged.size() < 40 && logged.insert(it->mesh).second)
               REXLOG_INFO("portal-chell: other skinned mesh {:08X} near the skater ({:.2f} m, {} bones, entity {:08X})", it->mesh, std::sqrt(d2),
                           it->bones.size() / 12, it->lw_entity);
             return;
           }
-        } else if (d2 > 1.8f * 1.8f) {
+          if (slot != 0 && d2 > 2.5f * 2.5f) return;  // the same mesh drawn for somebody else far away
+        } else if (d2 > radius * radius) {
           return;
         }
-        if (chell_meshes.insert(it->mesh).second) chell_pals.push_back({it->mesh, b, uint32_t(it->bones.size() / 12)});
-        if (it->lw_entity) chell_entities.insert(it->lw_entity);
+        if (cd.meshes.insert(it->mesh).second) cd.pals.push_back({it->mesh, b, uint32_t(it->bones.size() / 12)});
+        claimed.insert(it->mesh);
+        if (it->lw_entity) cd.entities.insert(it->lw_entity);
       };
       for (const auto& [dist, it] : opaque_items) consider(it);
       for (const DrawItem* it : transparent_items) consider(it);
       static int chell_diag_sets = 0;
-      static std::unordered_set<uint32_t> chell_last_set;
-      if (chell_meshes != chell_last_set && chell_diag_sets++ < 60) {
+      static std::unordered_set<uint32_t> chell_last_set[skate3::portal_chell::kSlots];
+      if (cd.meshes != chell_last_set[slot] && chell_diag_sets++ < 60) {
         std::string ids;
-        for (uint32_t id : chell_meshes) ids += fmt::format(" {:08X}", id);
-        REXLOG_INFO("portal-chell: skater's skeleton now draws {} parts:{} ", chell_meshes.size(), ids);
+        for (uint32_t id : cd.meshes) ids += fmt::format(" {:08X}", id);
+        REXLOG_INFO("portal-chell: CHAR slot {} skeleton now draws {} parts:{} ", slot, cd.meshes.size(), ids);
       }
-      chell_last_set = chell_meshes;
+      chell_last_set[slot] = cd.meshes;
       static int chell_diag = 0;
-      if (chell_pals.empty() && (chell_diag++ % 120) == 0) {
+      if (slot == 0 && cd.pals.empty() && (chell_diag++ % 120) == 0) {
         int skinned = 0, captured = 0;
         float best = 1e9f;
         const auto probe = [&](const DrawItem* it) {
@@ -10586,59 +10600,69 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
         for (const DrawItem* it : transparent_items) probe(it);
         REXLOG_INFO("portal-chell: no skater parts (skinned items {} captured {} nearest palette root {:.2f} m)", skinned, captured, best);
       }
-      if (!chell_pals.empty()) {
-        if (!skate3::portal_chell::Ready()) {
+      if (!cd.pals.empty()) {
+        if (!skate3::portal_chell::Ready(slot)) {
           std::vector<uint32_t> parts;
-          for (const auto& p : chell_pals) parts.push_back(p.mesh);
-          skate3::portal_chell::Build(parts);
+          for (const auto& p : cd.pals) parts.push_back(p.mesh);
+          skate3::portal_chell::Build(slot, parts);
         }
-        chell_on = skate3::portal_chell::Ready() && skate3::portal_chell::Skin(chell_pals);
+        cd.on = skate3::portal_chell::Ready(slot) && skate3::portal_chell::Skin(slot, cd.pals);
+        chell_on = chell_on || cd.on;
       }
     }
   }
   hide_item = [&](const DrawItem& it) {
     if (adopted_look(&it)) return true;
-    return chell_on && it.dyn_entity && (chell_meshes.count(it.mesh) != 0 || (it.lw_entity != 0 && chell_entities.count(it.lw_entity) != 0));
+    if (!chell_on || !it.dyn_entity) return false;
+    for (const CharDraw& cd : char_draw) {
+      if (cd.on && (cd.meshes.count(it.mesh) != 0 || (it.lw_entity != 0 && cd.entities.count(it.lw_entity) != 0))) return true;
+    }
+    return false;
   };
-  // Chell herself: her skinned vertices (CPU skinning with the skater's palettes), drawn indexed with her own textures.
+  // The characters themselves: their skinned vertices (CPU skinning through their own skeletons), drawn indexed with their own textures.
   const auto draw_chell = [&](const float* vp) {
-    const skate3::portal_gun::Model* cm = skate3::portal_gun::GetChell();
-    if (!chell_on || cm == nullptr || g_r.ui_ring_cpu == nullptr || g_r.pso_spline_zwrite == nullptr) return;
-    for (size_t m = 0; m < cm->mesh.size(); ++m) {
-      const skate3::portal_gun::Mesh& mesh = cm->mesh[m];
-      const std::vector<float>& pos = skate3::portal_chell::Positions(m);
-      const uint32_t nv = uint32_t(mesh.vtx.size() / 8), ni = uint32_t(mesh.idx.size());
-      const uint32_t vbytes = nv * 28, ibytes = (ni * 2 + 3) & ~3u;
-      if (nv < 3 || ni < 3 || pos.size() != size_t(nv) * 3 || mesh.tex >= 4 || !g_r.chell_tex[mesh.tex].valid ||
-          ui_offset + vbytes + ibytes > RendererState::kUiRegionSize) {
-        continue;
+    if (!chell_on || g_r.ui_ring_cpu == nullptr || g_r.pso_spline_zwrite == nullptr) return;
+    for (int slot = 0; slot < skate3::portal_chell::kSlots; ++slot) {
+      const skate3::portal_gun::Model* cm = skate3::portal_chell::SlotModel(slot);
+      const int ch = skate3::portal_chell::SlotCharacter(slot);
+      if (!char_draw[slot].on || cm == nullptr || ch < 0 || ch >= skate3::portal_gun::kCharacters) continue;
+      GuestTexture* texs = g_r.character_tex[ch];
+      for (size_t m = 0; m < cm->mesh.size(); ++m) {
+        const skate3::portal_gun::Mesh& mesh = cm->mesh[m];
+        const std::vector<float>& pos = skate3::portal_chell::Positions(slot, m);
+        const uint32_t nv = uint32_t(mesh.vtx.size() / 8), ni = uint32_t(mesh.idx.size());
+        const uint32_t vbytes = nv * 28, ibytes = (ni * 2 + 3) & ~3u;
+        if (nv < 3 || ni < 3 || pos.size() != size_t(nv) * 3 || mesh.tex >= 4 || !texs[mesh.tex].valid ||
+            ui_offset + vbytes + ibytes > RendererState::kUiRegionSize) {
+          continue;
+        }
+        float* out = reinterpret_cast<float*>(g_r.ui_ring_cpu + ui_region + ui_offset);
+        for (uint32_t k = 0; k < nv; ++k) {
+          float* o = out + k * 7;
+          o[0] = pos[size_t(k) * 3];
+          o[1] = pos[size_t(k) * 3 + 1];
+          o[2] = pos[size_t(k) * 3 + 2];
+          o[3] = 1.0f;
+          o[4] = mesh.vtx[size_t(k) * 8 + 6];
+          o[5] = mesh.vtx[size_t(k) * 8 + 7];
+          o[6] = 1.0f;
+        }
+        std::memcpy(g_r.ui_ring_cpu + ui_region + ui_offset + vbytes, mesh.idx.data(), ni * 2);
+        cmd->SetPipeline(g_r.pso_spline_zwrite);
+        float consts[20];
+        std::memcpy(consts, vp, sizeof(float) * 16);
+        consts[16] = 1.0f;
+        consts[17] = 1.0f;
+        consts[18] = 0.0f;
+        consts[19] = 3.0f;
+        cmd->SetRootConstants(0, 20, consts, 0);
+        cmd->SetTexture(1, texs[mesh.tex].srv);
+        cmd->SetVertexBuffer(g_r.ui_ring, ui_region + ui_offset, vbytes, 28);
+        cmd->SetIndexBuffer(g_r.ui_ring, ui_region + ui_offset + vbytes, ni * 2);
+        cmd->SetPrimitiveTopology(nrhi::PrimitiveTopology::kTriangleList);
+        cmd->DrawIndexed(ni, 0, 0);
+        ui_offset += vbytes + ibytes;
       }
-      float* out = reinterpret_cast<float*>(g_r.ui_ring_cpu + ui_region + ui_offset);
-      for (uint32_t k = 0; k < nv; ++k) {
-        float* o = out + k * 7;
-        o[0] = pos[size_t(k) * 3];
-        o[1] = pos[size_t(k) * 3 + 1];
-        o[2] = pos[size_t(k) * 3 + 2];
-        o[3] = 1.0f;
-        o[4] = mesh.vtx[size_t(k) * 8 + 6];
-        o[5] = mesh.vtx[size_t(k) * 8 + 7];
-        o[6] = 1.0f;
-      }
-      std::memcpy(g_r.ui_ring_cpu + ui_region + ui_offset + vbytes, mesh.idx.data(), ni * 2);
-      cmd->SetPipeline(g_r.pso_spline_zwrite);
-      float consts[20];
-      std::memcpy(consts, vp, sizeof(float) * 16);
-      consts[16] = 1.0f;
-      consts[17] = 1.0f;
-      consts[18] = 0.0f;
-      consts[19] = 3.0f;
-      cmd->SetRootConstants(0, 20, consts, 0);
-      cmd->SetTexture(1, g_r.chell_tex[mesh.tex].srv);
-      cmd->SetVertexBuffer(g_r.ui_ring, ui_region + ui_offset, vbytes, 28);
-      cmd->SetIndexBuffer(g_r.ui_ring, ui_region + ui_offset + vbytes, ni * 2);
-      cmd->SetPrimitiveTopology(nrhi::PrimitiveTopology::kTriangleList);
-      cmd->DrawIndexed(ni, 0, 0);
-      ui_offset += vbytes + ibytes;
     }
     cmd->SetPipeline(scene_pso_bound);
   };

@@ -81,6 +81,8 @@ bool InsideOpening(const float p[3], float slack);
 // every frame. Their physics bodies are not props: no hole under them and no prop crossing (they vanished and fell, runs 180/181).
 void SetCharacterPositions(const float (*p)[3], int n);
 bool NearCharacter(const float p[3], float radius);
+// The other characters' positions (NPC skaters, pedestrians; not the human), as last published. Any thread.
+int CharacterPositions(float (*out)[3], int max);
 
 // Body-collision hole. True when a world-triangle contact (triangle through `tri_point` with normal `tri_normal`) for a
 // moving shape centred at `mover` should be dropped: the triangle lies in a placed portal's plane and the shape is over

@@ -840,7 +840,8 @@ struct RendererState {
   // = lit .. 3 = dark), [12] = a soft black shadow.
   GuestTexture cube_tex[13];
   GuestTexture gun_tex[4];
-  GuestTexture chell_tex[4];  // Chell's textures (skate3_portal_chell)  // the Portal gun model's textures (skate3_portal_gunmodel)
+  GuestTexture chell_tex[4];  // (unused since the character slots; kept so nothing else moves)
+  GuestTexture character_tex[3][4];  // per Portal 2 character (portal_gun::Character): its own textures (skate3_portal_chell slots)  // Chell's textures (skate3_portal_chell)  // the Portal gun model's textures (skate3_portal_gunmodel)
   // See-through portals: the world seen through portal i, rendered by a second item pass from a virtual camera and
   // resolved here (scene HDR format, output size). Rests in RENDER_TARGET; portal_view_psr tracks the sampled state.
   // pso_portal_view = the spline darken pixel shader (non-HDR variant, so colours pass through unchanged), opaque.

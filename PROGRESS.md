@@ -675,3 +675,24 @@ Actor offsets: +1200/+1216 ground pos, +1232 delta, +1248 velocity, +1296 flags,
     - Gel through portals: a gel shot that passes into an opening before it hits (portal_math::RayThroughPortal, tested) is shot again
       out of the other portal along the turned direction, up to 2 hops (`GEL [f N] shot went into the blue portal ...; shooting on out
       of the orange one ..., hop k`). Portal shots are not passed through (as in Portal).
+62. Portal 2 characters in their own slots, on their own skeletons (built, untested; nothing visible until T8 makes the caches).
+    - Extractor (tools/re/portalgun_extract.py --character chell|atlas|pbody|all): cache version 2 = mesh + textures + the model's bones
+      (name, parent, bind pose = inverse of the MDL's pose-to-bone) + each vertex's own up-to-3 bone weights (from the VVD). Characters:
+      models/player/chell/player, ballbot (Atlas), eggbot (P-body); LOD 2 by default. Loader (portal_gun) reads v1 and v2 (round trip
+      checked here with a synthetic file); GetCharacter(c) per character slot, thread-safe.
+    - Retarget (src/skate3_portal_retarget.{h,cpp}, tests/skate3_portal_retarget_test.cpp): (a) pose fix: parent first, each limb bone
+      (subtree <= 40% of the vertices, reaching out from its joint) is turned about its joint (600 directions, <= 100 degrees) to lie on the
+      skater vertices the rest of the character does not cover (an A-pose arm meets a T-pose skater arm); (b) map: each character bone ->
+      the skater bone (part << 8 | palette index) its corrected vertices sit on (vote by its own weights); bones without vertices follow the
+      parent; (c) every frame each vertex = sum_i w_i P[map(b_i)] rest_v with the character's OWN weights. Test: A-pose arm on a T-pose
+      skater: map correct, gap 0.115 -> 0.007 m, a bent skater elbow bends the character's forearm.
+    - Slots (portal_chell): slot 0 = you (Ctrl+0 cycles off / Chell / Atlas / P-body, skipping missing caches; cvars skate3_portal_chell,
+      skate3_portal_character), slots 1-2 = co-op (Ctrl+Shift+0, skate3_portal_coop off, skate3_portal_coop_characters "atlas,pbody"): each
+      follows one of the nearest NPC characters (gate's published character positions; picks within 25 m, follows within 3 m a frame,
+      re-picks after losing it or 3 s without its parts). Each slot builds and skins on its own; v1 caches still use the old nearest-vertex
+      weights. A full Build/Skin smoke test with a synthetic character ran here (the A-pose arm ends on the skater's T arm).
+    - Renderer (skate3_native_scene_gpu.cpp, NOT COMPILED HERE): the Chell block is now a loop over slots (parts near each slot's target, a
+      mesh belongs to one slot, hide_item over all slots, draw per slot with g_r.character_tex[character], uploaded per character).
+    - Logs: `CHAR you: atlas (N bones, own skeleton)`, `CHAR slot s (name): own skeleton N bones, M mapped ... onto K skater bones, T bones
+      turned (largest X deg), gap a -> b m, built in Y ms`, one `bone i NAME -> skater part P bone B` line per bone, `follows the NPC`.
+    - Not done / spec request R10: listing them in the game's own character select (needs Skate's character data); exact bone names.
