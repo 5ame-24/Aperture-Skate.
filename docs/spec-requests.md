@@ -47,3 +47,10 @@ Answers it: the real Skate 3 "backwards man" trick, reproduced by input or by st
 (riding, air, off-board, landing) trigger it, which velocity or board fields it writes and in what units, and whether it can be
 triggered on purpose and repeated. Then: is the 548.9 m/s spike from the same mechanism, or from our teleport writing the board
 rates (`boardV` / `actorV` in the TRACE lines)?
+
+## R7. Existing Skate 3 first-person mod  (open, research)
+Needed by: the first-person view (PROGRESS 53/55). A first-person mod for Skate 3 has been released; its approach may show how the
+game's camera and skater model are driven from outside.
+Answers it: what the mod hooks (camera state, head/skeleton bones, input), which game functions or fields it writes, and what it
+does about the camera during riding and in the air. Compare with our follower-mode camera in `skate3_native_scene*.cpp` and the PCAM
+logs. Written as a cleanroom summary: take the behaviour, not code.
