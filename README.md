@@ -23,19 +23,33 @@ walk and fling through them with your speed intact. A personal, educational reve
 Flings out of wall portals (they lose speed), on-foot momentum and Portal-style walking in first person, the characters' look, gels on the
 board, listing the Portal characters in the game's own character select. Status and history: [PROGRESS.md](PROGRESS.md).
 
+## Requirements (bring your own game)
+
+Nothing from the games is included or downloadable here. You need:
+
+- **Skate 3 for Xbox 360**, your own copy, as an extracted game folder containing `default.xex` and `data/webkit/EAWebkit.xex` (the base
+  recomp's release builds can extract it from your ISO with their "Select ISO" installer; see [docs/skate3-recomp-README.md](docs/skate3-recomp-README.md)).
+- **Skate 3 Title Update 3**, the package `TU_12K2276_000000C000000.00000000000O3` (the same file the base recomp's title update installer
+  fetches), placed in the repository root. Builds without it fall back to the untested retail image.
+- Optional: **Portal 2** installed (Steam), for the portal gun model and the Chell / Atlas / P-body characters.
+- Toolchain: CMake 3.25+, Ninja, Clang 18+ (Clang 20 on Linux; Apple Clang and MSVC do not work), Python 3. Linux packages:
+  [docs/skate3-recomp-README.md](docs/skate3-recomp-README.md#ubuntulinux-build).
+
 ## Build
 
-Same toolchain as the base recomp (CMake 3.25+, Ninja, Clang 18+; full details in [docs/skate3-recomp-README.md](docs/skate3-recomp-README.md)).
-The build-time code generation needs your extracted game dump (`default.xex`, `data/webkit/EAWebkit.xex`): put it in `game/`, or pass
-`-DSKATE3_GAME_DATA_ROOT=/path/to/game`.
+1. Clone with submodules: `git clone --recursive <repo-url> && cd skate3recomp`
+2. Put your extracted game folder at `game/` (or anywhere, and pass its path as `SKATE3_GAME_DATA_ROOT` below), and the Title Update file in
+   the repository root.
+3. Generate the recompiled sources, reconfigure, build (presets: `macos-release`, `linux-release`, `release` on Windows, or `relwithdebinfo`):
 
 ```sh
-git clone --recursive <repo-url> && cd skate3recomp
-cmake --preset macos-release -DSKATE3_GAME_DATA_ROOT="$PWD/game"     # or relwithdebinfo / linux-release / release
+cmake --preset macos-release -DSKATE3_GAME_DATA_ROOT="$PWD/game"
 cmake --build out/build/macos-release --target generate-all --parallel
-cmake --preset macos-release -DSKATE3_GAME_DATA_ROOT="$PWD/game"     # again, so CMake sees the generated sources
+cmake --preset macos-release -DSKATE3_GAME_DATA_ROOT="$PWD/game"
 cmake --build out/build/macos-release --target skate3 -j 8
 ```
+
+The generated sources (`generated/`), the build (`out/`) and your game files (`game/`) never go into git.
 
 ## Run
 
@@ -43,6 +57,9 @@ cmake --build out/build/macos-release --target skate3 -j 8
 cd out/build/macos-release
 ./skate3 --game_data_root=/path/to/game --fullscreen=false --skate3_portal_gate=true
 ```
+
+`--skate3_portal_gate=true` turns the portal mod on (without it you get the plain recomp). On the first launch the game may stage the title
+update; then load into free skate and shoot a portal.
 
 | Action | Mouse / keyboard | Pad (hold D-pad down) |
 |---|---|---|
@@ -53,7 +70,14 @@ cd out/build/macos-release
 | AUTOTEST | Ctrl+Shift+T | |
 | Gel mode / Portal characters panel | Ctrl+H / Ctrl+Shift+C | B |
 
-Optional Portal 2 assets (portal gun model, characters), from your own install: `python3 tools/re/portalgun_extract.py --character all`.
+Optional Portal 2 assets (portal gun model, characters), made from your own install (written outside the repo):
+
+```sh
+python3 tools/re/portalgun_extract.py                        # the portal gun
+python3 tools/re/portalgun_extract.py --character all        # Chell, Atlas, P-body
+```
+
+Logs land in `out/build/macos-release/logs/`; `python3 tools/re/leaplog.py` summarises the latest one.
 
 ## Contribute
 
