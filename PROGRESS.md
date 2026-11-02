@@ -728,13 +728,8 @@ Actor offsets: +1200/+1216 ground pos, +1232 delta, +1248 velocity, +1296 flags,
     - Props: falling onto blue at >= 1.5 m/s comes back at least skate3_portal_gel_prop_bounce (5 m/s, ~1.3 m); run 197's reflections were
       1-2 m/s settling props (a few cm, invisible).
     - Later round (requested): an in-air gel object (Portal-style) to help aim the mechanic.
-65. Gel droppers (built, untested; the "in-air gel object" the tester asked for). In gel mode Ctrl+Shift+H switches the gun between paint and
-    DROPPER; a dropper shot places a pipe (under a ceiling it hits, else 4 m above the hit; 4 at most). Each drops a blob every 0.2 s; blobs
-    fall under the measured gravity, pass through portals (portal_math::BlobAdvance, tested: floor portal -> wall portal, at least Portal 2's
-    paint exit speed 5.7 m/s) and paint where they land (quietly, merged with the same spot). Landing uses the game's ray service: one more
-    ray per Start/End batch (BlobRay, scratch below the cube's), round robin, the blob with the oldest answer, refreshed every 0.25 s and after
-    a portal. Overlay: droppers (dark nozzle, coloured ring), blobs (dots). Logs `dropper placed`, `blob N went through the blue portal`, `blob
-    paint #N` (every 50th, with the count lost after 5 s without a surface). Clear removes droppers and blobs.
+65. Gel droppers: built, then ROLLED BACK (the tester did not like how the stream looked; they want the gel to come from the gun).
+    The idea moves to the roadmap as an item dropper.
 66. Character slots panel (built, untested; user: "slots for the portal characters"). Ctrl+Shift+C opens "Portal characters": one row per slot
     (You, Co-op 1 = nearest NPC, Co-op 2 = next NPC), buttons Skater / Chell / Atlas / P-body (greyed when that cache is missing), and the
     slot's status (off, waiting for its skater, found an NPC, "<name>: own skeleton N bones, M mapped onto K skater bones, gap a -> b m",
@@ -749,9 +744,6 @@ Actor offsets: +1200/+1216 ground pos, +1232 delta, +1248 velocity, +1296 flags,
       before, 176 ms now, both arms turned, gap 0.088 -> 0.016 m. And builds run on their own thread (portal_chell: g_pending, picked up
       in Ready(); the captured clouds are copied under the lock, then released; a failed build waits 1 s before retrying), so the skater
       shows until the character is ready ("building (...)" in the panel's status).
-    - Dropper: Ctrl+Shift+H produced no line at all (the bind never reached the game; Ctrl+Shift+C/9 did). Ctrl+H now cycles portals ->
-      paint -> DROPPER -> portals (and D-pad down + B); the Ctrl+Shift+H bind still works if it arrives and logs `GEL key Ctrl+Shift+H
-      received`. First 6 blob rays are logged (`GEL blob N ray: hit at ... / no hit`).
     - CHARSEL: the per-place lines come before the pointer pass (`place i at ADDR (ASCII|UTF-16BE): [text]` or `read failed`); the pointer
       pass is one hash lookup per word with progress lines (25/50/75/100%), and an unreadable pointer neighbourhood is logged. Run 200 found
       "Shingo" in 24 places and the second (pointer) pass was cut short by quitting.
@@ -832,3 +824,6 @@ Actor offsets: +1200/+1216 ground pos, +1232 delta, +1248 velocity, +1296 flags,
     - WALK probe (spec R9): while walking (> 1.2 m/s, 1 s clear of a crossing), 30 scans of actor +0..0x800 and skeleton +0..0x4100 for
       vectors within 15% of the walking velocity; one line `WALK on-foot velocity carriers ... actor+0x... n/30; skeleton+0x... n/30`. That
       store is what an on-foot portal crossing must turn and hold (Portal's on-foot flings), next round.
+
+## Roadmap
+- Item dropper: add the rolled-back gel dropper (item 65) as an item dropper, since the tester thought it was a decent item.
