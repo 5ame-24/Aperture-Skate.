@@ -53,6 +53,10 @@ struct Carry {
   float last_pos[3] = {}, last_game[3] = {};
   bool have_last = false, told_wait = false;
   int frames = 0;
+  // Righting (Portal's camera re-orientation after a tilted exit): the carried camera's axes, rolled back toward upright over time.
+  pm::Pose axes;
+  float omega = 0, roll0 = -1;
+  int64_t last_ns = 0, upright_ns = 0;
 };
 Carry g_carry;
 unsigned g_seen_seq = 0, g_fpv_seq = 0;
@@ -120,6 +124,10 @@ bool Apply(const float cam_view[16], const float proj[16], bool camera_owned, fl
       std::copy(exit, exit + 3, g_carry.exit);
       g_carry.cross_ns = cross_ns;
       g_carry.start_ns = now;
+      {
+        const float zero[3] = {0, 0, 0};
+        pm::CarryPose(pre->pose, R, zero, &g_carry.axes);  // offset and axes through the portal; position re-added per frame
+      }
       REXLOG_INFO("portal-camera: PCAM carry started (crossing {}): camera was ({:.2f}, {:.2f}, {:.2f}) from the skater ({:.1f} m, pose "
                   "{:.0f} ms before the crossing), portal turns it {:.0f} deg",
                   seq, pre->pose.pos[0], pre->pose.pos[1], pre->pose.pos[2], std::sqrt(pm::Dot(pre->pose.pos, pre->pose.pos)),
@@ -153,7 +161,20 @@ bool Apply(const float cam_view[16], const float proj[16], bool camera_owned, fl
     return false;
   }
   pm::Pose carried;
-  pm::CarryPose(c.rel, c.R, skater, &carried);
+  {
+    const float dt = c.last_ns ? float(now - c.last_ns) * 1e-9f : 1.0f / 60.0f;
+    c.last_ns = now;
+    const float left = pm::RightRoll(&c.axes, &c.omega, std::clamp(dt, 0.0f, 0.05f), pm::RightRules{});
+    if (c.roll0 < 0) {
+      c.roll0 = left;
+      if (left > 1.0f) REXLOG_INFO("portal-camera: PCAM righting a {:.0f} deg roll after the exit", left);
+    } else if (left <= 0.05f && c.upright_ns == 0 && c.roll0 > 1.0f) {
+      c.upright_ns = now;
+      REXLOG_INFO("portal-camera: PCAM upright after {:.0f} ms", (now - c.start_ns) / 1e6);
+    }
+    carried = c.axes;
+    for (int k = 0; k < 3; ++k) carried.pos[k] = skater[k] + c.axes.pos[k];
+  }
   // The game camera is usable once it is about as far from the skater as before the crossing (it may still be flying in from the entry).
   const float rel_len = std::sqrt(pm::Dot(c.rel.pos, c.rel.pos));
   const float game_len = Dist(game.pos, skater);

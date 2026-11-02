@@ -23,6 +23,7 @@ reads). Commit after every task so a bad one can be reverted alone.
 | T4 | Haiku | move one block of text, no wording changes |
 | T5 | Haiku | delete one log line + its comment |
 | T6 | Sonnet | behaviour-identical refactor across two files, needs judgment and a build |
+| T7 | Sonnet | touches constants used in several files, needs a build |
 Suggested runs: one Haiku session for T1-T5, then one Sonnet session for T6.
 
 ---
@@ -72,4 +73,12 @@ helper). Results must be bit-for-bit the same maths (same formulas, same order o
 float rounding). Do NOT touch `Step` (the human's crossing) or `HoleSkips`.
 Check: build passes; the unit tests pass; `git diff` shows only those functions; a short in-game run with a prop dropped through a
 floor portal still logs `portal-props: body ... crossed` and the cube still logs `portal-cube: crossed`.
+
+## T7. Portal size as a cvar (Portal's own proportions on demand)
+Files: `src/skate3_portal_gate.cpp` (`kHalfWidth`, `kHalfHeight`, every use), `src/skate3_portal_math.{h,cpp}` (`kHalfWidth`, `kHalfHeight`, `InOval`).
+Goal: add `REXCVAR_DEFINE_DOUBLE(skate3_portal_gate_size, 1.0, ...)` (hot reload) in skate3_portal_gate.cpp that scales both half extents
+(default 1.0 = today's 2.6 x 2.0 m). Replace the constants by functions `HalfWidth()` / `HalfHeight()` returning constant x scale, in both
+files (portal_math gets a setter `SetSizeScale(float)` the gate calls each frame; its default must stay 1.0 so the unit tests still pass).
+Behaviour at 1.0 must be identical. Note in the cvar help: Portal's own portal is 1.63 x 2.74 m (half 0.81 x 1.37), i.e. tall, not wide.
+Check: build passes; unit tests pass; in game `--skate3_portal_gate_size=0.5` draws and crosses half-size portals.
 

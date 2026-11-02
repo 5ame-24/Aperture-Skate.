@@ -608,4 +608,20 @@ Actor offsets: +1200/+1216 ground pos, +1232 delta, +1248 velocity, +1296 flags,
       Logs: `FPVTRACK re-acquired the skater through its entity ... after N lost frames`, `FPVTRACK lost the skater for 30 frames`.
       Side effect to watch: tracking (and therefore crossings, the gun origin, the cube's hand point) now resumes in the air right after a
       crossing instead of at the next landing.
+58. Portal behaviour from public sources + offline Portal 2 data (built, untested; no game code read).
+    - docs/specs/001-portal-public-behaviour.md: gravity 600 u/s^2 = 15.24 m/s^2, max 3500 u/s per axis = 88.9 m/s, momentum v_out = R v_in,
+      floor-portal funnelling (height 128 u = 3.25 m, well above 256 u, snap 10 u, gimme dot 0.9), camera righting after tilted exits
+      (cl_portal_camera_orientation_* 480 / 45 / 375 / 1000 deg), portal 1.63 x 2.74 m, placement clearances, ghosting, stencil depth 2.
+      Valve wiki and theportalwiki are not reachable from the cloud session (network allowlist); the public cvar list on GitHub was.
+    - `tools/re/portal2_facts.py [portal2_dir]` (runs on the user's Mac): reads every map's entity lump (BSP lump 0; LZMA handled) and the
+      cfg files of the user's own Portal 2 (loose and inside pak01_dir.vpk), never scripts; writes ~/Library/Application Support/
+      Skate3PortalMod/portal2_facts.json and prints a "PASTE THIS" summary: Aerial Faith Plate (trigger_catapult) player/physics speeds,
+      exact-velocity / threshold / angle settings, prop_portal sizes, tractor beam and push speeds, portal/gravity cvars in configs.
+      Tested here on a synthetic map only.
+    - FUNNEL (cvar `skate3_portal_funnel`, default OFF = a later round's feature): `portal_math::FunnelCorrection` (tested: a 1.8 m
+      off-centre fall lands within 0.6 m of the centre instead of ~1.7 m) steers the human's in-plane velocity while falling toward a
+      floor portal, written through `AddVelocity` (board rates, actor +1248, learned skeleton vectors). Logs `FUNNEL toward the X floor
+      portal: H m up, predicted landing D m off centre`, `FUNNEL done (why): N frames ...`.
+    - Camera righting in the carry (`skate3_portal_camcarry`): the carried camera's roll eases back to upright with `portal_math::RightRoll`
+      (tested: 90 deg rights in 0.25-1 s). Logs `PCAM righting a N deg roll after the exit`, `PCAM upright after T ms`.
 

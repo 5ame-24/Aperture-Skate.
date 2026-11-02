@@ -78,6 +78,11 @@ REXCVAR_DEFINE_BOOL(skate3_portal_fling_skeleton, true, "Skate 3",
                     "arcs agree; until then FLING touches the board rates only).")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
+REXCVAR_DEFINE_BOOL(skate3_portal_funnel, false, "Skate 3",
+                    "Portal-style funnelling: while you fall toward a floor portal (from up to ~3 m, or ~6.5 m when already heading into it) "
+                    "your sideways velocity is steered so you land in its centre instead of on its rim. Log prefix FUNNEL.")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
 REXCVAR_DEFINE_BOOL(skate3_portal_airprobe, true, "Skate 3",
                     "Read-only measurement (spec request R5): for each clean airborne arc, log the gravity fitted to the skater's path and how "
                     "well each candidate velocity store (board rates, actor +1248, skeleton vectors) matches the real velocity. Log prefix AIR.")
@@ -1105,6 +1110,80 @@ void AirProbe(uint8_t* base, uint32_t self, const float p[3], uint32_t flags) {
   arc.s.push_back(x);
 }
 
+// Add `dv` (world, m/s) to the human's velocity stores: the board's 7 linear rates, the actor's world velocity, and the skeleton vectors the
+// AIR probe found moving with the skater (when skate3_portal_fling_skeleton). Shared by FUNNEL.
+void AddVelocity(uint8_t* base, uint32_t self, const float dv[3]) {
+  uint32_t board = 0, block = 0, skel = 0;
+  if (ReadBe32(base, self + 1880, &board) && ReadBe32(base, board + 12, &block) && block >= 0x10000 && block < 0xC0000000 && !(block & 3)) {
+    for (int i = 0; i < 7; ++i) {
+      float v[3];
+      const uint32_t a = block + kLinRates + 16 * i;
+      if (ReadVec(base, a, v)) {
+        for (int c = 0; c < 3; ++c) WriteBeFloat(base, a + 4 * c, v[c] + dv[c]);
+      }
+    }
+  }
+  float av[3];
+  if (ReadVec(base, self + 1248, av)) {
+    for (int c = 0; c < 3; ++c) WriteBeFloat(base, self + 1248 + 4 * c, av[c] + dv[c]);
+  }
+  const uint32_t mask = REXCVAR_GET(skate3_portal_fling_skeleton) ? g_air_skel_mask.load() : 0u;
+  if (mask && ReadBe32(base, self + 1884, &skel) && skel >= 0x10000 && skel < 0xC0000000 && !(skel & 3)) {
+    for (int k = 0; k < kAirSkel; ++k) {
+      float sv[3];
+      const uint32_t a = skel + 0x2770 + 16 * k;
+      if ((mask & (1u << k)) && ReadVec(base, a, sv)) {
+        for (int c = 0; c < 3; ++c) WriteBeFloat(base, a + 4 * c, sv[c] + dv[c]);
+      }
+    }
+  }
+}
+
+// ---- FUNNEL (cvar skate3_portal_funnel): Portal's floor-portal funnelling, from its public description (docs/specs/001) ----
+struct FunnelState {
+  int frames = 0, portal = -1;
+  float dv_total = 0, first_offset = 0, height = 0;
+};
+FunnelState g_funnel;
+
+void FunnelStep(uint8_t* base, uint32_t self, const float p[3], const float v[3], uint32_t flags, float dt) {
+  namespace pm = skate3::portal_math;
+  FunnelState& f = g_funnel;
+  auto finish = [&](const char* why) {
+    if (f.frames > 0) {
+      REXLOG_INFO("portal-probe: FUNNEL done ({}): {} frames toward the {} floor portal, total sideways change {:.2f} m/s (landing was {:.2f} m off "
+                  "centre from {:.1f} m up)", why, f.frames, f.portal ? "orange" : "blue", f.dv_total, f.first_offset, f.height);
+    }
+    f = FunnelState{};
+  };
+  pm::Frame g[2];
+  const bool riding = (flags & 0xF0000000u) == 0xC0000000u;
+  if (!REXCVAR_GET(skate3_portal_funnel) || riding || g_fling.left > 0 || !skate3::portal_gate::PortalPairFrames(g)) {
+    finish(riding ? "landed or riding" : "off");
+    return;
+  }
+  const float gravity = g_air_gravity_n.load() >= 3 ? g_air_gravity.load() : 9.81f;
+  const pm::FunnelRules rules;
+  for (int i = 0; i < 2; ++i) {
+    float dv[3], off;
+    if (!pm::FunnelCorrection(g[i], p, v, gravity, std::clamp(dt, 0.001f, 0.05f), rules, dv, &off)) continue;
+    if (f.frames == 0) {
+      float lat, vert, h;
+      pm::Local(g[i], p, &lat, &vert, &h);
+      f.portal = i;
+      f.first_offset = off;
+      f.height = h;
+      REXLOG_INFO("portal-probe: FUNNEL toward the {} floor portal: {:.1f} m up, predicted landing {:.2f} m off centre, gravity {:.2f}",
+                  i ? "orange" : "blue", h, off, gravity);
+    }
+    AddVelocity(base, self, dv);
+    ++f.frames;
+    f.dv_total += std::hypot(dv[0], std::hypot(dv[1], dv[2]));
+    return;
+  }
+  finish("no longer heading into a floor portal");
+}
+
 // Publish the other characters (NPC skaters, pedestrians) for the hole and the prop code, and remember which entity is the human's.
 void PublishCharacters(uint8_t* base, const float human[3]) {
   skate3::native_entity::CharacterEntity ents[48];
@@ -1359,6 +1438,13 @@ bool GateStep(PPCContext& ctx, uint8_t* base, uint32_t self) {
     }
   }
   AirProbe(base, self, p, flags);
+  {
+    static int64_t funnel_last = 0;
+    const int64_t fnow = std::chrono::steady_clock::now().time_since_epoch().count();
+    const float fdt = funnel_last ? float(fnow - funnel_last) * 1e-9f : 1.0f / 60.0f;
+    funnel_last = fnow;
+    FunnelStep(base, self, p, vel3, flags, fdt);
+  }
   std::copy(p, p + 3, last);
   have = true;
   const float speed_before = speed_now;
