@@ -899,3 +899,9 @@ Actor offsets: +1200/+1216 ground pos, +1232 delta, +1248 velocity, +1296 flags,
 
 ## Roadmap
 - Item dropper: add the rolled-back gel dropper (item 65) as an item dropper, since the tester thought it was a decent item.
+80. Run 214 (HANDOFF 23): carry WORKS ("carry is working very well"): 16.6 m/s in -> 14.2 m up (rule 17.8), 24.5 -> 25.1 m (rule 39.0).
+    After 17:04 the result read "out at -X m/s up": exits that faced DOWN (a ceiling portal, e.g. the bridge's underside): Portal's rule
+    sends you out downward, correctly; but they were treated as fling exits (ollie, release, carry). Now only UPWARD steep exits get the
+    fling treatment; downward exits are left to gravity. The carry's result line adds the skater bodies' upward speed as the game left it
+    (before our write) for each of the first 10 frames, to see whether the game fights the carry on the small drops that fell short or
+    did not fly (#14, #206, #210).

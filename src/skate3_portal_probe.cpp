@@ -871,6 +871,9 @@ struct Carry {
   float vout[3] = {}, gravity = 9.81f;
   int64_t t0 = 0, until = 0;
   std::atomic<int> writes{0};
+  // the bodies' upward speed as the game left it (before our write), per 1/30 s for the first 10 frames: does the game fight the carry?
+  std::atomic<float> vy_sum[10] = {};
+  std::atomic<int> vy_n[10] = {};
 } g_carry;
 bool g_fling_steep_exit = false;  // set by the crossing: |v_out.y| > half its speed, or out of a floor upward
 int g_recover_window = 0;  // frames after a crossing in which the game's own recovery warps keep the board's rates
@@ -2734,7 +2737,9 @@ bool GateStep(PPCContext& ctx, uint8_t* base, uint32_t self) {
   const float out_n = v_exit[0] * cross.exit_n[0] + v_exit[1] * cross.exit_n[1] + v_exit[2] * cross.exit_n[2];
   {
     const float vl = std::sqrt(v_exit[0] * v_exit[0] + v_exit[1] * v_exit[1] + v_exit[2] * v_exit[2]);
-    g_fling_steep_exit = (vl > 1.0f && std::abs(v_exit[1]) > 0.5f * vl) || (cross.exit_n[1] > 0.7f && out_n > 0.5f);
+    // UPWARD steep exits only (run 214 after 17:04: a ceiling exit sends you out downward at your fall speed, Portal's rule; the ollie /
+    // release / carry made no sense there and the result read "out at -16 m/s up"). Downward exits are left to gravity.
+    g_fling_steep_exit = (vl > 1.0f && v_exit[1] > 0.5f * vl) || (cross.exit_n[1] > 0.7f && out_n > 0.5f);
   }
   if (cross.exit_n[1] > 0.7f && out_n > 0.5f) {  // (any real outward motion: the same rule for every speed)
     const float* c = cross.exit_c;
@@ -3410,6 +3415,7 @@ extern "C" REX_FUNC(sub_82DB88C8) {
         const float apex = g_fling.vout[1] > 0 ? g_fling.vout[1] / std::max(1.0f, g_fling.gravity) : 0.3f;
         g_carry.until = now + int64_t(std::clamp(apex, 0.3f, 1.5f) * 1e9);
         g_carry.writes = 0;
+        for (int i = 0; i < 10; ++i) g_carry.vy_sum[i] = 0.0f, g_carry.vy_n[i] = 0;
         g_carry.active = true;
       } else if (g_fexit.mode == 1) {
         uint32_t fl = 0, skel = 0, w = 0;
@@ -3453,7 +3459,16 @@ extern "C" REX_FUNC(sub_82DB88C8) {
       const float rose = g_fexit.peak - g_fexit.y0;
       REXLOG_INFO("portal-probe: FLING #{} [{}]: fell in at {:.1f} m/s, out at {:.1f} m/s up; Portal rule: rise {:.1f} m; rose {:.2f} m, top upward speed "
                   "{:.1f} m/s{} - {}", g_fexit.seq, skate3::portal_gate::FlingModeName(g_fexit.mode), g_fexit.fall_in, vy, portal_rise, rose,
-                  g_fexit.vy_max, g_fexit.mode == 4 ? (", " + std::to_string(g_carry.writes.load()) + " body velocity writes").c_str() : "",
+                  g_fexit.vy_max, g_fexit.mode == 4 ? [&] {
+                    std::string t = ", " + std::to_string(g_carry.writes.load()) + " body velocity writes; bodies' vy as the game left it, per frame:";
+                    for (int i = 0; i < 10; ++i) {
+                      const int nn = g_carry.vy_n[i].load();
+                      char b[16];
+                      std::snprintf(b, sizeof(b), nn ? " %.1f" : " -", nn ? g_carry.vy_sum[i].load() / float(nn) : 0.0f);
+                      t += b;
+                    }
+                    return t;
+                  }().c_str() : "",
                   portal_rise < 0.5f ? "not an upward fling" : rose > 0.5f * portal_rise ? "FLEW" : rose > 0.15f * portal_rise ? "partly"
                                                                                                                       : "NOT FLYING");
     }
@@ -4603,6 +4618,12 @@ extern "C" REX_FUNC(sub_82AE6590) {
       }
       if (own) {
         const float t = float(now - g_carry.t0) * 1e-9f;
+        const int bucket = int(t * 30.0f);
+        float before[3];
+        if (bucket >= 0 && bucket < 10 && ReadVec(base, body + 32, before)) {
+          g_carry.vy_sum[bucket].store(g_carry.vy_sum[bucket].load() + before[1]);
+          g_carry.vy_n[bucket].fetch_add(1);
+        }
         const float v[3] = {g_carry.vout[0], g_carry.vout[1] - g_carry.gravity * t, g_carry.vout[2]};
         for (int c = 0; c < 3; ++c) WriteBeFloat(base, body + 32 + 4 * c, v[c]);
         g_carry.writes.fetch_add(1, std::memory_order_relaxed);
