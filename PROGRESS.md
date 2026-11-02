@@ -873,3 +873,13 @@ Actor offsets: +1200/+1216 ground pos, +1232 delta, +1248 velocity, +1296 flags,
     - The 59.7 vs 13.2 m/s "mismatch" in run 211 was two different crossings (16:11:59 a 13 m/s drop; 16:15:49 a floor-floor fall loop that
       had built up to ~60 m/s, where the smoothed estimate lags: 45). The CONSISTENCY entry line now names its crossing # and says the
       estimate is smoothed.
+77. Flings: four bold ways to get airborne at a fling exit, switchable in one session (built, untested; user: "less traces and logs, more bold
+    attempts"). The game ends every teleport riding, and riding drops upward speed; in the AIR the held exit velocity sticks (airborne
+    crossings 96%, gel landing bounces). skate3_portal_fling_mode, Ctrl+F cycles, shown under the banner ("fling: ollie (Ctrl+F)"):
+    - ollie (default): when the fling exit's teleport ends, the right-stick ollie flick (down 0.1 s, up 0.1 s) is played into the pad for
+      you: the game's own pop takes it into the air.
+    - air: the air state is set directly (actor state 200, flags 9xxxxxxx, on-board byte cleared) on the first frame after the teleport.
+    - lift: the floor exit starts 3 m up (out of reach of the ground snap) instead of 1 m.
+    - release: only the on-board byte is released after the teleport (HANDOFF 20).
+    One line per fling: `FLING #n [mode]: rose X m (a free flight at V m/s up would rise Y m) - FLEW | partly | NOT FLYING`. Removed: the
+    per-frame FLING / FLINGTRACE lines and the per-crossing entry-velocity line (kept only when a store is rejected).
