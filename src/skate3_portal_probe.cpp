@@ -31,6 +31,7 @@
 #include <rex/logging.h>
 
 #include "native/skate3_native_entity.h"
+#include "skate3_native_scene_state.h"
 #include "skate3_portal_chell.h"
 #include "skate3_portal_cube.h"
 #include "skate3_portal_gate.h"
@@ -71,6 +72,12 @@ REXCVAR_DEFINE_BOOL(skate3_portal_fling, true, "Skate 3",
                     "For a few frames after you go through a portal, keep your speed along the exit direction at what the portal "
                     "says it should be (entry velocity turned by the portal, minus gravity), so a fall into a floor portal flings you out of a "
                     "wall portal. Log prefix FLING.")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
+REXCVAR_DEFINE_DOUBLE(skate3_portal_gate_riding_lift, 0.6, "Skate 3",
+                      "Metres a crossing that starts ROLLING (on the ground) comes out above where it would, when it leaves through a wall portal: "
+                      "an exit that starts airborne keeps its speed, one at ground level goes back into the riding model, which drops "
+                      "the restored velocity (state-100 crossings kept ~45%, airborne ones 96%). 0 = off.")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
 REXCVAR_DEFINE_INT32(skate3_portal_fling_frames, 10, "Skate 3",
@@ -700,6 +707,89 @@ void CollectCubeRay(PPCContext& ctx, uint8_t* base) {
     }
   }
   skate3::portal_cube::OnRay(g_cube_ray.want.kind, hit, r, r + 8);
+}
+
+// PORTALFIT: a new portal's 8 rim probe rays, submitted together in one Start and collected at End. Their vectors sit below every other
+// scratch (gun 0, cube 128): 512 + 48 k, and every call's stack starts below all of them, so no call can overwrite a ray that is
+// still queued.
+struct FitBatch {
+  std::atomic<int> state{0};  // 0 idle, 1 wanted, 2 submitted
+  int which = 0, n = 0;
+  uint32_t gen = 0;
+  float o[8][3] = {}, d[8][3] = {}, len = 1.0f;
+  uint32_t handle[8] = {};
+  uint32_t mgr = 0, this_ptr = 0;
+  int age = 0;
+};
+FitBatch g_fit_batch;
+constexpr uint32_t kFitScratch = 512, kFitStack = 512 + 48 * 8 + 256;
+
+void SubmitFitRays(PPCContext& ctx, uint8_t* base, uint32_t self) {
+  uint32_t mgr = 0;
+  const uint32_t filter = g_start_filter;
+  if (!ReadBe32(base, self + 1908, &mgr) || !mgr || filter == 0xFFFFFFFFu) {
+    g_fit_batch.state = 0;
+    return;
+  }
+  const SavedRegs saved(ctx);
+  const uint32_t top = (saved.r1 - 2048) & ~0xFu;
+  for (int k = 0; k < g_fit_batch.n; ++k) {
+    const uint32_t scratch = top - kFitScratch - 48 * uint32_t(k);
+    const auto& o = g_fit_batch.o[k];
+    const auto& d = g_fit_batch.d[k];
+    const float L = g_fit_batch.len;
+    const float vecs[12] = {o[0], o[1], o[2], 1.0f, d[0] * L, d[1] * L, d[2] * L, 0.0f, 0, 0, 0, 0};
+    WriteBeFloats(base, scratch, vecs, 12);
+    ctx.r1.u32 = top - kFitStack;
+    ctx.r3.u32 = mgr;
+    ctx.r4.u32 = scratch;
+    ctx.r5.u32 = scratch + 16;
+    ctx.r6.u32 = scratch + 32;
+    ctx.r7.u32 = filter;
+    sub_82E0B4E0(ctx, base);
+    g_fit_batch.handle[k] = ctx.r3.u32;
+  }
+  saved.Restore(ctx);
+  g_fit_batch.mgr = mgr;
+  g_fit_batch.this_ptr = self;
+  g_fit_batch.state = 2;
+}
+
+void CollectFitRays(PPCContext& ctx, uint8_t* base) {
+  const SavedRegs saved(ctx);
+  const uint32_t top = (saved.r1 - 2048) & ~0xFu;
+  bool hit[8] = {};
+  float pos[8][3] = {}, nrm[8][3] = {};
+  uint32_t service = 0, vtable = 0, fn = 0;
+  const bool callable = ReadBe32(base, g_fit_batch.mgr + 4, &service) && ReadBe32(base, service, &vtable) && ReadBe32(base, vtable + 32, &fn) &&
+                        fn >= 0x82000000 && fn < 0x83000000;
+  for (int k = 0; k < g_fit_batch.n && callable; ++k) {
+    ctx.r1.u32 = top - kFitStack;
+    ctx.r3.u32 = service;
+    ctx.r4.u32 = g_fit_batch.handle[k];
+    ctx.ctr.u32 = fn;
+    ctx.lr = 0;
+    t_gun_query = true;  // our own query: the portal hole must not cut it (it looks at the portal's own surface)
+    REX_CALL_INDIRECT_FUNC(ctx.ctr.u32);
+    t_gun_query = false;
+    const uint32_t res = ctx.r3.u32;
+    uint32_t raw[16];
+    if (res >= 0x10000 && res < 0xC0000000 && skate3::native_scene::GuestTryCopy(raw, base + res, sizeof(raw))) {
+      float r[16];
+      for (int i = 0; i < 16; ++i) r[i] = BeFloat(raw[i]);
+      hit[k] = r[12] >= 0.0f && std::isfinite(r[0]) && std::isfinite(r[8]);
+      const auto& d = g_fit_batch.d[k];
+      if (hit[k] && r[8] * d[0] + r[9] * d[1] + r[10] * d[2] > 0.0f) r[8] = -r[8], r[9] = -r[9], r[10] = -r[10];
+      for (int c = 0; c < 3; ++c) pos[k][c] = r[c], nrm[k][c] = r[8 + c];
+    }
+  }
+  saved.Restore(ctx);
+  g_fit_batch.state = 0;
+  if (!callable) {
+    REXLOG_INFO("portal-probe: PORTALFIT rim probes: ray results not readable");
+    return;
+  }
+  skate3::portal_gate::FitResult(g_fit_batch.which, g_fit_batch.gen, hit, pos, nrm);
 }
 
 constexpr uint32_t kLinRates = 0x140;
@@ -1423,6 +1513,12 @@ bool CharselPrintable(const uint8_t* p, size_t n, bool utf16, std::string* out) 
   return out->size() >= 3;
 }
 
+std::string fmt_list_hint(int stride, int n) {
+  char b[96];
+  std::snprintf(b, sizeof(b), " LOOKS LIKE A LIST: stride %d bytes, %d neighbours hold known text IDs", stride, n);
+  return b;
+}
+
 void CharselScan(uint8_t* base, std::string names) {
   struct Range {
     uint32_t lo, hi;
@@ -1463,12 +1559,19 @@ void CharselScan(uint8_t* base, std::string names) {
     for_chunks([&](uint32_t a, const uint8_t* d) {
       for (int enc = 0; enc < 2; ++enc) {
         const std::string& needle = enc ? u16 : name;
-        for (uint32_t i = 0; i + needle.size() <= kChunk && hits.size() < 24; ++i) {
+        for (uint32_t i = 0; i + needle.size() <= kChunk && hits.size() < 64; ++i) {
           if (d[i] == uint8_t(needle[0]) && std::memcmp(d + i, needle.data(), needle.size()) == 0) hits.push_back({a + i, enc == 1});
         }
       }
     });
-    REXLOG_INFO("portal-probe: CHARSEL \"{}\": {} places in guest memory{}", name, hits.size(), hits.size() >= 24 ? " (first 24)" : "");
+    REXLOG_INFO("portal-probe: CHARSEL \"{}\": {} places in guest memory{}", name, hits.size(), hits.size() >= 64 ? " (first 64)" : "");
+    // standalone labels first (NUL on both sides: a UI string such as the selector's, not a line of dialogue), then the first 8
+    std::stable_partition(hits.begin(), hits.end(), [&](const std::pair<uint32_t, bool>& hp) {
+      uint8_t e0 = 1, e1 = 1;
+      skate3::native_scene::GuestTryCopy(&e0, base + hp.first - (hp.second ? 2 : 1), 1);
+      skate3::native_scene::GuestTryCopy(&e1, base + hp.first + uint32_t(hp.second ? 2 * name.size() + 1 : name.size()), 1);
+      return e0 == 0 && e1 == 0;
+    });
     if (hits.size() > 8) hits.resize(8);
     // each place first, before the slow pointer pass (run 200: the scan was stopped before any per-place line)
     std::vector<std::string> arounds(hits.size());
@@ -1528,12 +1631,38 @@ void CharselScan(uint8_t* base, std::string names) {
         }
       }
     }
+    auto word_at = [&](uint32_t at, uint32_t* w) {
+      uint8_t wb[4];
+      if (!skate3::native_scene::GuestTryCopy(wb, base + at, 4)) return false;
+      *w = (uint32_t(wb[0]) << 24) | (uint32_t(wb[1]) << 16) | (uint32_t(wb[2]) << 8) | wb[3];
+      return true;
+    };
+    auto row_line = [&](uint32_t row, uint32_t stride, std::string* out) {
+      out->clear();
+      for (uint32_t k = 0; k < stride / 4 && k < 16; ++k) {
+        uint32_t w = 0;
+        char wbuf[12];
+        std::snprintf(wbuf, sizeof(wbuf), " %08X", word_at(row + 4 * k, &w) ? w : 0xDEADDEADu);
+        *out += wbuf;
+      }
+    };
+    static int row_lines = 0;  // all rows logged in this scan (capped)
+    // Text IDs: the game's text tables pair each string pointer with a 32-bit ID (run 207: words "ptr id ptr id"). A character list most
+    // likely names its entry by that ID, not by a pointer to the text. id_text maps the IDs seen around each pointer back to their text.
+    std::unordered_map<uint32_t, std::string> id_text;
+    std::vector<uint32_t> shingo_ids;
     for (size_t hi = 0; hi < hits.size(); ++hi) {
       const uint32_t h = hits[hi].first;
       const bool utf16 = hits[hi].second;
       const std::vector<uint32_t>& refs = all_refs[hi];
       const std::string& around = arounds[hi];
-      REXLOG_INFO("portal-probe: CHARSEL \"{}\" at {:08X} ({}): [{}], {} pointers to it", name, h, utf16 ? "UTF-16BE" : "ASCII", around, refs.size());
+      // a standalone label (NUL before and after the name) is a UI string; text inside a sentence is dialogue
+      uint8_t edge[2] = {1, 1};
+      skate3::native_scene::GuestTryCopy(&edge[0], base + h - (utf16 ? 2 : 1), 1);
+      skate3::native_scene::GuestTryCopy(&edge[1], base + h + uint32_t(utf16 ? 2 * name.size() + 1 : name.size()), 1);
+      const bool standalone = edge[0] == 0 && edge[1] == 0;
+      REXLOG_INFO("portal-probe: CHARSEL \"{}\" at {:08X} ({}{}): [{}], {} pointers to it", name, h, utf16 ? "UTF-16BE" : "ASCII",
+                  standalone ? ", standalone label" : ", inside other text", around, refs.size());
       for (size_t ri = 0; ri < refs.size() && ri < 6; ++ri) {
         const uint32_t ref = refs[ri];
         uint32_t words[32] = {};
@@ -1550,7 +1679,11 @@ void CharselScan(uint8_t* base, std::string names) {
           line += wbuf;
         }
         REXLOG_INFO("portal-probe: CHARSEL   pointer at {:08X}, words -64..+64:{}", ref, line);
-        // a table? the stride at which other words also point at printable names
+        // the ID next to the pointer (the word after it; the word before as a second guess), when it is not itself a pointer
+        for (const uint32_t idw : {words[17], words[15]}) {
+          if (idw != 0 && !in_ranges(idw) && std::find(shingo_ids.begin(), shingo_ids.end(), idw) == shingo_ids.end()) shingo_ids.push_back(idw);
+        }
+        // a table? the stride at which other words also point at printable names; its rows are logged (index, name, words)
         int best_stride = 0, best_n = 0;
         std::string best_names;
         for (uint32_t stride = 4; stride <= 512; stride += 4) {
@@ -1559,13 +1692,11 @@ void CharselScan(uint8_t* base, std::string names) {
           for (int dir = -1; dir <= 1; dir += 2) {
             for (int k = 1; k <= 24; ++k) {
               const uint32_t at = ref + uint32_t(dir * k) * stride;
-              uint8_t wb[4];
-              if (!skate3::native_scene::GuestTryCopy(wb, base + at, 4)) break;
-              const uint32_t w = (uint32_t(wb[0]) << 24) | (uint32_t(wb[1]) << 16) | (uint32_t(wb[2]) << 8) | wb[3];
-              std::string s;
-              if (!in_ranges(w) || !read_str(w, &s)) break;
+              uint32_t w = 0;
+              std::string str;
+              if (!word_at(at, &w) || !in_ranges(w) || !read_str(w, &str)) break;
               ++n;
-              if (got.size() < 300) got += (got.empty() ? "" : ", ") + s;
+              if (got.size() < 300) got += (got.empty() ? "" : ", ") + str;
             }
           }
           if (n > best_n) best_n = n, best_stride = int(stride), best_names = got;
@@ -1573,11 +1704,132 @@ void CharselScan(uint8_t* base, std::string names) {
         if (best_n >= 2) {
           REXLOG_INFO("portal-probe: CHARSEL   looks like a table: stride {} bytes, {} neighbouring entries also name something: {}", best_stride, best_n,
                       best_names);
+          // the text IDs of this table (the word after each string pointer), for resolving IDs found elsewhere
+          for (int k = -2000; k <= 2000; ++k) {
+            const uint32_t at = ref + uint32_t(k * best_stride);
+            uint32_t ptr = 0, idw = 0;
+            std::string str;
+            if (!word_at(at, &ptr) || !in_ranges(ptr) || !word_at(at + 4, &idw) || idw == 0 || in_ranges(idw)) continue;
+            if (id_text.size() < 20000 && read_str(ptr, &str)) id_text.emplace(idw, str);
+          }
+          if (standalone) {
+            for (int k = -12; k <= 12 && row_lines < 400; ++k, ++row_lines) {
+              const uint32_t row = ref + uint32_t(k * best_stride);
+              uint32_t ptr = 0;
+              std::string str = "?", words_s;
+              if (word_at(row, &ptr) && in_ranges(ptr)) read_str(ptr, &str);
+              row_line(row, uint32_t(best_stride), &words_s);
+              REXLOG_INFO("portal-probe: CHARSEL   table {:08X} row {:+d} at {:08X}: \"{}\" words:{}", ref, k, row, str, words_s);
+            }
+          }
+        }
+      }
+    }
+    // Where else does Shingo's text ID appear? A table whose rows hold text IDs at the same offset (other characters' names) is the list.
+    REXLOG_INFO("portal-probe: CHARSEL \"{}\": candidate text IDs {} ({} IDs known from the text tables)", name, [&] {
+      std::string t;
+      for (uint32_t idw : shingo_ids) {
+        char b2[12];
+        std::snprintf(b2, sizeof(b2), " %08X", idw);
+        t += b2;
+      }
+      return t.empty() ? std::string(" none") : t;
+    }(), id_text.size());
+    if (!shingo_ids.empty() && shingo_ids.size() <= 16) {
+      std::vector<std::pair<uint32_t, uint32_t>> id_hits;  // address, id
+      for_chunks([&](uint32_t a, const uint8_t* d) {
+        for (uint32_t i = 0; i + 4 <= kChunk && id_hits.size() < 64; i += 4) {
+          const uint32_t w = (uint32_t(d[i]) << 24) | (uint32_t(d[i + 1]) << 16) | (uint32_t(d[i + 2]) << 8) | d[i + 3];
+          for (uint32_t idw : shingo_ids)
+            if (w == idw) id_hits.push_back({a + i, idw});
+        }
+      });
+      REXLOG_INFO("portal-probe: CHARSEL \"{}\": {} places hold one of its text IDs", name, id_hits.size());
+      int shown_ids = 0;
+      for (const auto& [at, idw] : id_hits) {
+        // rows of a list: neighbours at a fixed stride hold other known text IDs
+        int best_stride = 0, best_n = 0;
+        std::string best_names;
+        for (uint32_t stride = 8; stride <= 1024; stride += 4) {
+          int n = 0;
+          std::string got;
+          for (int dir = -1; dir <= 1; dir += 2) {
+            for (int k = 1; k <= 32; ++k) {
+              uint32_t w = 0;
+              if (!word_at(at + uint32_t(dir * k) * stride, &w)) break;
+              const auto it = id_text.find(w);
+              if (it == id_text.end()) break;
+              ++n;
+              if (got.size() < 300) got += (got.empty() ? "" : ", ") + it->second;
+            }
+          }
+          if (n > best_n) best_n = n, best_stride = int(stride), best_names = got;
+        }
+        const bool listy = best_n >= 3;
+        if (shown_ids++ < 24 || listy) {
+          std::string words_s;
+          row_line(at - 16, 48, &words_s);
+          REXLOG_INFO("portal-probe: CHARSEL   ID {:08X} at {:08X}{}{}; words -16..+32:{}", idw, at,
+                      listy ? fmt_list_hint(best_stride, best_n) : std::string(""), listy ? ": " + best_names : std::string(""), words_s);
+        }
+        if (listy) {
+          for (int k = -16; k <= 16 && row_lines < 400; ++k, ++row_lines) {
+            const uint32_t row = at + uint32_t(k * best_stride);
+            uint32_t w = 0;
+            std::string words_s;
+            row_line(row - 16, uint32_t(std::min(best_stride, 64)), &words_s);
+            const auto it = word_at(row, &w) ? id_text.find(w) : id_text.end();
+            REXLOG_INFO("portal-probe: CHARSEL   list {:08X} row {:+d}: \"{}\" (ID {:08X}) words from -16:{}", at, k,
+                        it != id_text.end() ? it->second : std::string("?"), w, words_s);
+          }
         }
       }
     }
   }
   REXLOG_INFO("portal-probe: CHARSEL done in {:.1f} s", std::chrono::duration<float>(std::chrono::steady_clock::now() - t0).count());
+}
+
+// Ctrl+Shift+9 starts the scan straight from the key (UI thread) with the base the renderer stores every frame: run 206, with the selector
+// open the skater never updates, so a scan queued for the next skater update never ran.
+std::atomic<bool> g_charsel_running{false};
+void StartCharselScan(uint8_t* base) {
+  if (!base) return;
+  if (g_charsel_running.exchange(true)) {
+    REXLOG_INFO("portal-probe: CHARSEL scan already running");
+    return;
+  }
+  std::thread([base, names = std::string(REXCVAR_GET(skate3_portal_charsel_names))] {
+    CharselScan(base, names);
+    g_charsel_running = false;
+  }).detach();
+}
+const bool g_charsel_runner_set = (skate3::portal_chell::SetSelectorProbeRunner([] {
+  uint8_t* base = skate3::native_scene::g_guest_base.load(std::memory_order_relaxed);
+  if (!base) return false;
+  REXLOG_INFO("portal-probe: CHARSEL scan started from the key (no skater update needed)");
+  StartCharselScan(base);
+  return true;
+}), true);
+
+float g_last_heading[2] = {0, 0};  // the skater's last horizontal travel direction with real speed (> 1 m/s), for vertical exits
+// FACING: which axis of the skater's presentation matrix is "forward" (learned while riding fast), so a crossing turns the real facing
+// through the pair (entering fakie or at an angle comes out the same way relative to the exit portal), not the travel direction.
+skate3::portal_math::FacingLearner g_facing;
+bool g_facing_logged = false;
+bool FacingNow(uint8_t* base, float out[3], int* axis_out) {
+  int axis;
+  float sign, agree;
+  if (!g_facing.Best(&axis, &sign, &agree) || agree < 0.9f) return false;
+  const uint32_t he = g_human_entity;
+  float rows[12];
+  if (!he || !skate3::native_entity::CharacterWorldMatrix(base, he, rows)) return false;
+  const float R[9] = {rows[0], rows[1], rows[2], rows[4], rows[5], rows[6], rows[8], rows[9], rows[10]};
+  skate3::portal_math::FacingLearner::Axis(R, axis, out);
+  const float l = std::sqrt(out[0] * out[0] + out[1] * out[1] + out[2] * out[2]);
+  if (l < 1e-3f) return false;
+  for (int k = 0; k < 3; ++k) out[k] *= sign / l;
+  *axis_out = axis;
+  return true;
 }
 
 // Tracking re-acquire (FPVTRACK): frames since the last crossing, its exit point, and frames without a usable position.
@@ -1587,17 +1839,7 @@ float g_track_exit[3] = {};
 bool GateStep(PPCContext& ctx, uint8_t* base, uint32_t self) {
   if (g_track_since_cross < 1000) ++g_track_since_cross;
   skate3::portal_gate::SetGameFrame(++g_gate_frame);
-  if (skate3::portal_chell::TakeSelectorProbe()) {
-    static std::atomic<bool> running{false};
-    if (!running.exchange(true)) {
-      std::thread([base, names = std::string(REXCVAR_GET(skate3_portal_charsel_names))] {
-        CharselScan(base, names);
-        running = false;
-      }).detach();
-    } else {
-      REXLOG_INFO("portal-probe: CHARSEL scan already running");
-    }
-  }
+  if (skate3::portal_chell::TakeSelectorProbe()) StartCharselScan(base);  // (fallback: no renderer frame had stored the guest base yet)
   static bool air_loaded = false;
   if (!air_loaded) {
     air_loaded = true;
@@ -1626,6 +1868,16 @@ bool GateStep(PPCContext& ctx, uint8_t* base, uint32_t self) {
     if (have && skate3::native_entity::SkaterWorldPosNear(base, tracked, 4.0f, head)) skate3::portal_gate::SetHead(head);
   }
   GunStep(have ? tracked : place_pos);
+  if (g_fit_batch.state == 0) {
+    if (skate3::portal_gate::FitRays(&g_fit_batch.which, &g_fit_batch.gen, g_fit_batch.o, g_fit_batch.d, &g_fit_batch.len)) {
+      g_fit_batch.n = skate3::portal_math::kRimProbes;
+      g_fit_batch.age = 0;
+      g_fit_batch.state = 1;
+    }
+  } else if (++g_fit_batch.age > 30) {
+    g_fit_batch.state = 0;  // never reached Start/End
+    REXLOG_INFO("portal-probe: PORTALFIT rim probes timed out (no ray batch for 30 updates)");
+  }
   PublishCharacters(base, riding ? place_pos : (have ? tracked : place_pos), riding,
                     have ? std::hypot(place_pos[0] - last[0], place_pos[2] - last[2]) : 0.0f);
   float p[3];
@@ -1708,6 +1960,24 @@ bool GateStep(PPCContext& ctx, uint8_t* base, uint32_t self) {
     if (have && dt > 0.001f && dt < 0.2f) {
       speed_now = std::hypot(p[0] - last[0], p[2] - last[2]) / dt;
       for (int c = 0; c < 3; ++c) vel3[c] += ((p[c] - last[c]) / dt - vel3[c]) * 0.5f;
+      const float hv = std::hypot(vel3[0], vel3[2]);
+      if (hv > 1.0f) g_last_heading[0] = vel3[0] / hv, g_last_heading[1] = vel3[2] / hv;
+      // learn the facing axis from clean riding (fast, well clear of a crossing)
+      if (riding && hv > 3.0f && g_track_since_cross > 60 && g_facing.n < 3000) {
+        float rows[12];
+        if (const uint32_t he = g_human_entity; he && skate3::native_entity::CharacterWorldMatrix(base, he, rows)) {
+          const float R[9] = {rows[0], rows[1], rows[2], rows[4], rows[5], rows[6], rows[8], rows[9], rows[10]};
+          g_facing.Add(R, g_last_heading);
+          int axis;
+          float sign, agree;
+          if (!g_facing_logged && g_facing.Best(&axis, &sign, &agree)) {
+            g_facing_logged = true;
+            REXLOG_INFO("portal-probe: FACING [f {}] learned: forward = entity matrix {} {} ({}), agreement {:.2f} over {} riding samples{}", g_gate_frame,
+                        axis < 3 ? "column" : "row", axis % 3, sign > 0 ? "+" : "-", agree, g_facing.n,
+                        agree < 0.9f ? " - too low, crossings keep using the velocity heading" : "");
+          }
+        }
+      }
     } else if (!have) {
       vel3[0] = vel3[1] = vel3[2] = 0.0f;
     }
@@ -1983,8 +2253,15 @@ bool GateStep(PPCContext& ctx, uint8_t* base, uint32_t self) {
   float vin[3] = {0, 0, 0}, vout[3];
   const float dlen = std::hypot(hx, hz);
   const float meas[2] = {dlen > 0.01f ? hx / dlen * speed_before : 0.0f, dlen > 0.01f ? hz / dlen * speed_before : 0.0f};
-  vin[0] = meas[0];
-  vin[2] = meas[1];
+  // Velocity in = the smoothed 3D velocity (the same one FLING and the rate turn use). It was this frame's HORIZONTAL displacement: the
+  // vertical part was dropped and one frame is noisy, so the facing came out at another angle than the speed (user: exit angles often not
+  // consistent with entry angles).
+  if (std::sqrt(vel3[0] * vel3[0] + vel3[1] * vel3[1] + vel3[2] * vel3[2]) > 0.5f) {
+    std::copy(vel3, vel3 + 3, vin);
+  } else {
+    vin[0] = meas[0];
+    vin[2] = meas[1];
+  }
   if (speed_before >= 3.0f && REXCVAR_GET(skate3_portal_probe)) {
     g_scan.clear();
     g_scan_frames = 0;
@@ -2005,7 +2282,34 @@ bool GateStep(PPCContext& ctx, uint8_t* base, uint32_t self) {
     std::copy(vin, vin + 3, vout);
   }
   float len = std::hypot(vout[0], vout[2]);
-  if (len < 0.5f) {
+  float facing_in[3], facing_out[3];
+  int facing_axis = -1;
+  bool use_facing = false;
+  if (FacingNow(base, facing_in, &facing_axis)) {
+    Turn(cross.vel, facing_in, facing_out);
+    use_facing = std::hypot(facing_out[0], facing_out[2]) > 0.3f;
+  }
+  if (use_facing) {
+    // your own facing, turned through the pair (fakie stays fakie, an angled entry stays angled relative to the exit portal)
+    hx = facing_out[0];
+    hz = facing_out[2];
+    REXLOG_INFO("portal-probe: GATE [f {}] exit facing from your facing (axis {}): in ({:.2f}, {:.2f}, {:.2f}) -> out ({:.2f}, {:.2f}, {:.2f}); "
+                "velocity heading out ({:.2f}, {:.2f})", g_gate_frame, facing_axis, facing_in[0], facing_in[1], facing_in[2], facing_out[0],
+                facing_out[1], facing_out[2], len > 0.01f ? vout[0] / len : 0.0f, len > 0.01f ? vout[2] / len : 0.0f);
+    len = std::hypot(hx, hz);
+  } else if (len < 0.5f && std::hypot(g_last_heading[0], g_last_heading[1]) > 0.5f) {
+    // Falling (nearly) straight in, or straight out (floor <-> ceiling, floor -> floor): the exit velocity has no heading. Keep your own
+    // heading, turned through the pair like everything else (Portal keeps your view relative to the portals); if that is vertical too, as is.
+    const float h3[3] = {g_last_heading[0], 0.0f, g_last_heading[1]};
+    float ht[3];
+    Turn(cross.vel, h3, ht);
+    const float tl = std::hypot(ht[0], ht[2]);
+    hx = tl > 0.3f ? ht[0] : h3[0];
+    hz = tl > 0.3f ? ht[2] : h3[2];
+    len = std::hypot(hx, hz);
+    REXLOG_INFO("portal-probe: GATE [f {}] exit heading from your last heading ({:.2f}, {:.2f}){}: the exit velocity is vertical", g_gate_frame, h3[0],
+                h3[2], tl > 0.3f ? ", turned through the pair" : ", kept");
+  } else if (len < 0.5f) {
     hx = cross.exit_dir[0];
     hz = cross.exit_dir[1];
     len = std::hypot(hx, hz);
@@ -2032,6 +2336,14 @@ bool GateStep(PPCContext& ctx, uint8_t* base, uint32_t self) {
   // logged crossings, all ~1 m up, kept 7-9 m/s; both ground-level ones lost it).
   constexpr float kExitLift = 1.0f;
   float feet_y = cross.exit_pos[1] - up_offset + kExitLift * cross.lift;
+  // Rolling into a portal (riding flags): with the hole every exit has lift 0, so a rolling crossing came out at ground level, back in the
+  // riding model, which drops added or restored velocity the same frame (the gel lift finding, run 197). Out of a wall portal it now starts
+  // a little above, airborne, and FLING holds the exit velocity until it lands. Floor exits keep EXITFIX's own height (they fly up anyway).
+  const float riding_lift = float(REXCVAR_GET(skate3_portal_gate_riding_lift));
+  if (riding && riding_lift > 0.0f && std::abs(cross.exit_n[1]) < 0.7f) {
+    feet_y += riding_lift;
+    REXLOG_INFO("portal-probe: GATE [f {}] rolling crossing: wall exit lifted {:.2f} m (an airborne exit keeps its speed)", g_gate_frame, riding_lift);
+  }
   // The exit point is the entity centre (~0.85 m above the feet). With the hole a floor exit comes out depth + 0.02 above the plane, so the
   // feet started up to 0.83 m INSIDE the floor and the skater sank or fell through once off the opening (run 181). Feet go on the floor plane;
   // for a ceiling exit the head stays under it.
@@ -3894,6 +4206,9 @@ extern "C" REX_FUNC(sub_82DB63C0) {
   if (g_cube_ray.state == 1) {
     SubmitCubeRay(ctx, base, self);
   }
+  if (g_fit_batch.state == 1) {
+    SubmitFitRays(ctx, base, self);
+  }
 }
 
 extern "C" REX_FUNC(sub_82DB6580) {
@@ -3904,6 +4219,9 @@ extern "C" REX_FUNC(sub_82DB6580) {
   }
   if (g_cube_ray.state == 2 && self == g_cube_ray.this_ptr) {
     CollectCubeRay(ctx, base);
+  }
+  if (g_fit_batch.state == 2 && self == g_fit_batch.this_ptr) {
+    CollectFitRays(ctx, base);
   }
 }
 

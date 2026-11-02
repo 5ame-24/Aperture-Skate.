@@ -573,6 +573,18 @@ bool CharacterWorldPos(uint8_t* base, uint32_t entity, float out[3]) {
   return EntityTranslation(base, entity, out);
 }
 
+bool CharacterWorldMatrix(uint8_t* base, uint32_t entity, float rows[12]) {
+  {
+    std::lock_guard<std::mutex> lock(g_mu);
+    const auto it = g_entities.find(entity);
+    if (it == g_entities.end() || it->second.view_refs <= 0 || it->second.cls == EntClass::kUnknown) return false;
+  }
+  if (!LoadF32Block(base, entity + kEntL2WTrans, rows, 12)) return false;
+  for (int i = 0; i < 12; ++i)
+    if (!std::isfinite(rows[i])) return false;
+  return true;
+}
+
 bool SkaterWorldPosNear(uint8_t* base, const float hint[3], float max_dist, float out[3]) {
   float best = max_dist;
   bool found = false;

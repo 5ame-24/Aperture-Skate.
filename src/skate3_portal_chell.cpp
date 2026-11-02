@@ -225,7 +225,10 @@ void TogglePicker() {
 }
 
 std::atomic<bool> g_selector_probe{false};
+std::atomic<bool (*)()> g_selector_runner{nullptr};
+void SetSelectorProbeRunner(bool (*runner)()) { g_selector_runner = runner; }
 void RequestSelectorProbe() {
+  if (auto* run = g_selector_runner.load(); run && run()) return;
   g_selector_probe = true;
   REXLOG_INFO("portal-chell: CHARSEL scan requested (runs on the next skater update, in the background)");
 }

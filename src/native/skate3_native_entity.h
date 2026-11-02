@@ -170,6 +170,8 @@ struct CharacterEntity {
 int CharacterEntities(uint8_t* base, CharacterEntity* out, int max);
 // World translation of one entity (entity+416). False when it is no longer a live character entity or the read faults.
 bool CharacterWorldPos(uint8_t* base, uint32_t entity, float out[3]);
+// The entity's world matrix as three rows [R | t] (translation in rows[3], rows[7], rows[11]).
+bool CharacterWorldMatrix(uint8_t* base, uint32_t entity, float rows[12]);
 
 // Rate-limited ident[] stats line; call once per built frame.
 void EmitStats();

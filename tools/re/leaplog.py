@@ -42,7 +42,8 @@ for line in open(path, errors="replace"):
                 "GEL mode ON", "GEL painted", "GEL cleared", "GEL shot hit nothing", "GEL bounce on blue", "bounce held by FLING", "result: rose",
                 "never left the ground", "on orange", "left orange", "GEL prop", "GEL skipped: on foot", "shot went into the", "GEL drawn in the world", "AIR loaded", "AIR no saved", "CHAR you:", "CHAR co-op", "follows the NPC", "own skeleton", "no skeleton in the cache",
                 "skeleton now draws", "CHAR slot", "reset (", "CHARSEL",
-                "lift armed", "lift done", "lift skipped", "lift refused", "boost: cached speed", ": held", "overwritten", "riding: lift", "capped"):
+                "lift armed", "lift done", "lift skipped", "lift refused", "boost: cached speed", ": held", "overwritten", "riding: lift", "capped", "set to", "(panel)", "building (", "GEL mode ON", "pointer pass", " place ", "candidate text IDs", "hold one of its text IDs", "LOOKS LIKE A LIST", "started from the key", "PORTALFIT", "fits", "best effort", "does not fit", "pushed",
+                "rolling crossing: wall exit lifted", "FACING", "exit facing from your facing", "exit heading from your last heading"):
         if tag in line:
             other[tag] += 1
     if "PCAM" in line:
@@ -75,7 +76,7 @@ for l in open(path, errors="replace"):
     if "own skeleton" in l and "mapped by their own vertices" in l or "loaded the" in l and "model from" in l:
         print(" ", l.split("portal-", 1)[-1].strip()[:220])
 for l in open(path, errors="replace"):
-    if "CHARSEL" in l and ("places in guest memory" in l or "looks like a table" in l):
+    if "CHARSEL" in l and ("places in guest memory" in l or "looks like a table" in l or "LOOKS LIKE A LIST" in l or "text IDs" in l):
         print(" ", l.split("portal-probe: ", 1)[-1].strip()[:240])
 for b in boosts:
     print(f"  orange ride {b[0]:.2f} s: in {b[1]:.1f}, peak {b[2]:.1f}, out {b[3]:.1f} m/s")

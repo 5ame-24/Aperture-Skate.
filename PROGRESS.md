@@ -749,6 +749,44 @@ Actor offsets: +1200/+1216 ground pos, +1232 delta, +1248 velocity, +1296 flags,
       "Shingo" in 24 places and the second (pointer) pass was cut short by quitting.
     - Freecam ENGAGED: not the new keys. The portal first person runs on the freecam path, so every first-person start (Ctrl+4, D-pad down
       + R3) logs it; the line now says which (`ENGAGED (portal first person: ...)` or `(drone camera: End key ...)`).
+68. Run 207 CHARSEL -> scan v3 (built, untested). Run 207: "Shingo" in 24 places, mostly dialogue; the two pointer hits sit in tables of
+    (string pointer, 32-bit ID) pairs (words "41867012 862BCC2E 4182A729 8637BA01"): the game's TEXT tables, not the character list. A list of
+    characters most likely names each entry by that text ID. The scan now:
+    - takes up to 64 places and checks standalone labels first (NUL before and after: a UI string like the selector's), marked in the log;
+    - for each table hit logs its rows (`table P row k at A: "text" words: ...`, 25 rows, standalone labels only, 400 row lines max) and
+      collects the table's text IDs (the word after each string pointer) into an ID -> text map;
+    - takes Shingo's candidate IDs (the word after / before each pointer to it), searches memory for them, and for each place logs the
+      words around it; where neighbours at one stride also hold known text IDs it logs `LOOKS LIKE A LIST: stride S` and every row
+      (`list A row k: "name" (ID) words ...`). That row is where a model / outfit reference next to the name should show.
+    - starts from the key (UI thread) with the renderer's guest base (native_scene::g_guest_base), so it runs with the selector open (run 206:
+      the selector stops skater updates, and the old scan waited for one); the skater-update path stays as a fallback.
+    Gel droppers: rolled back after run 207 (see item 65); the code is not in this build, Ctrl+H is portals <->
+    paint again.
+69. Core portal mechanics (built, untested).
+    - Rolling crossings: with the hole on (default) every exit had lift 0 (gate Step: `lift = hole ? 0`), so a crossing that started
+      ROLLING (riding flags) came out at ground level, back in the riding model, which drops restored / added velocity the same frame (the
+      gel-lift finding, run 197): why state-100 crossings kept ~45% while airborne ones kept 96%. Wall exits of rolling crossings now start
+      skate3_portal_gate_riding_lift (0.6 m) higher, airborne; FLING holds the exit velocity. Log `GATE [f N] rolling crossing: wall exit
+      lifted 0.60 m`. crossings.py now prints kept speed separately for riding and airborne crossings.
+    - Portal fitting (skate3_portal_gate_fit, on), as in Portal: (a) a new portal on the same surface as the other one is pushed just clear
+      of it (portal_math::OverlapPush: the oval's radius along the direction between them, x2 + 5 cm); (b) then up to 4 rounds of 8 rim
+      probe rays (0.92 of the oval, from 0.5 m in front, 1 m into the surface; all 8 in one ray batch, FitBatch, scratch below every other
+      ray's); a probe that misses or hits off the plane / another surface marks that side; the portal moves 0.35 m away from the marked
+      side (FitShift), 2 m at most; opposite sides both off = the surface is smaller than the portal (kept, logged). Logs `PORTALFIT blue
+      round k: [oooxx-oo] 3 off, nudged (...)` (o on the surface, x another surface, - nothing), `fits after nudging`, `does not fit`,
+      `best effort`, `pushed X m clear of the orange portal`. Answers wait at most 1.5 s, then the round is asked again.
+    - Unit tests: RimProbe / RimProbeOk / FitShift / OverlapPush.
+70. Exit angles (user: "exit angles often aren't consistent with entry angles"; built, untested).
+    - Cause: the crossing's exit heading came from v_in = this frame's HORIZONTAL displacement (vertical dropped, one noisy frame), while
+      FLING and the board-rate turn use the smoothed 3D velocity and the full pair matrix: speed and facing left the portal in different
+      directions for angled, jumping or falling entries. v_in is now the smoothed 3D velocity for everything.
+    - Facing through the portal: Portal keeps your orientation relative to the portals. FACING learns which axis of the skater's presentation
+      matrix (native_entity::CharacterWorldMatrix; 3 columns / 3 rows) is forward while riding fast (>3 m/s, 2 s clear of a crossing;
+      portal_math::FacingLearner, tested; sign by majority so fakie stretches do not flip it); once it agrees >= 0.9, a crossing turns that
+      facing by the pair matrix and the exit faces that way (fakie stays fakie, an angled entry stays angled). When the turned facing is
+      (nearly) vertical (floor -> wall) the velocity heading is used; when the velocity is vertical too, the last heading turned through
+      the pair. Logs `FACING learned: forward = entity matrix row/column k (+/-), agreement A`, `GATE exit facing from your facing (axis k): in
+      (...) -> out (...); velocity heading out (...)`, `exit heading from your last heading`.
 
 ## Roadmap
 - Item dropper: add the rolled-back gel dropper (item 65) as an item dropper, since the tester thought it was a decent item.

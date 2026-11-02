@@ -78,7 +78,7 @@ Answers it:
   Portal character could be listed as a selectable character, and how NPC skaters pick theirs.
 - the rest pose the skin palettes are relative to (bind pose), measured once from a palette vs the captured rest vertices.
 
-## R11. The game's character select (Free Play skater list, e.g. Shingo)  (open; CHARSEL probe built to gather data)
+## R11. The game's character select (Free Play skater list, e.g. Shingo)  (open; CHARSEL v3: text IDs, PROGRESS 68)
 Needed by: Chell / Atlas / P-body as entries in the game's own character select, next to the skate characters (HANDOFF 9 goal 3).
 The implementation side does not read game code, so this needs a spec:
 - hook point: the function that builds the selector's list (its entries, their order, the count) and the one called when an entry is picked;
@@ -88,3 +88,4 @@ The implementation side does not read game code, so this needs a spec:
   "the default skater + portal_chell slot 0 = Chell" instead of a game model.
 Data help at runtime: Ctrl+Shift+9 (CHARSEL) logs every place the names in skate3_portal_charsel_names sit in guest memory, the pointers to
 them and the table stride around each pointer. Run it with the selector open.
+Run 207: the pointers to "Shingo" are in text tables (string pointer + 32-bit text ID rows); the list itself is probably keyed by text ID.
