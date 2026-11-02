@@ -519,6 +519,45 @@ int main() {
     float q[3] = {0, 1, 0}, w[3] = {1, 0, 0};
     CHECK(BlobAdvance(nullptr, q, w, 10.0f, 0.1f, 5.7f) == -1 && Near(q[0], 0.1f) && Near(w[1], -1.0f) && Near(q[1], 0.9f));
   }
+  {
+    // fitting: a wall portal facing +z at the origin
+    Frame f;
+    const float c0[3] = {0, 2, 0}, n0[3] = {0, 0, 1}, u0[3] = {0, 1, 0};
+    SetFrame(f, c0, n0, u0, 0.0f);
+    FitRules fr;
+    float o[3], d[3], dir2[2];
+    RimProbe(f, 0, fr, o, d, dir2);  // k = 0: along +r, at 0.92 of the half width, 0.5 m in front, looking into the wall
+    CHECK(Near(o[0], kHalfWidth * fr.rim) && Near(o[1], 2.0f) && Near(o[2], 0.5f) && Near(d[2], -1.0f) && Near(dir2[0], 1.0f));
+    const float on[3] = {1, 2, 0.02f}, off[3] = {1, 2, -0.6f}, nz[3] = {0, 0, 1}, nx[3] = {1, 0, 0};
+    CHECK(RimProbeOk(f, true, on, nz, fr));
+    CHECK(!RimProbeOk(f, true, off, nz, fr));  // a hit far behind the plane (an outside corner)
+    CHECK(!RimProbeOk(f, true, on, nx, fr));   // another surface
+    CHECK(!RimProbeOk(f, false, on, nz, fr));
+    bool ok[kRimProbes];
+    for (bool& b : ok) b = true;
+    float sh[2];
+    CHECK(FitShift(ok, fr, sh) == 0);
+    ok[0] = false;  // the right edge is off the wall: move left
+    CHECK(FitShift(ok, fr, sh) == 1 && Near(sh[0], -fr.step) && Near(sh[1], 0));
+    ok[1] = false;  // right and upper right: move left and down
+    CHECK(FitShift(ok, fr, sh) == 1 && sh[0] < 0 && sh[1] < 0 && Near(std::hypot(sh[0], sh[1]), fr.step));
+    ok[4] = false;  // left too: the wall is narrower than the portal
+    CHECK(FitShift(ok, fr, sh) == 2);
+    // overlap: the second portal 1 m to the right of the first on the same wall is pushed to 2 x half width + 5 cm
+    Frame b = f;
+    b.c[0] = 1.0f;
+    float push[3];
+    CHECK(OverlapPush(f, b, kHalfWidth, kHalfHeight, push) && Near(push[0], 2.0f * kHalfWidth + 0.05f - 1.0f) && Near(push[1], 0));
+    b.c[0] = 0.0f;
+    b.c[1] = 3.0f;  // 1 m above: pushed up to 2 x half height + 5 cm
+    CHECK(OverlapPush(f, b, kHalfWidth, kHalfHeight, push) && Near(push[1], 2.0f * kHalfHeight + 0.05f - 1.0f));
+    b.c[1] = 2.0f + 2.0f * kHalfHeight + 0.1f;  // already clear
+    CHECK(!OverlapPush(f, b, kHalfWidth, kHalfHeight, push));
+    Frame w2;
+    const float c2[3] = {1, 2, 0}, n2[3] = {1, 0, 0};
+    SetFrame(w2, c2, n2, u0, 0.0f);  // another wall: no push
+    CHECK(!OverlapPush(f, w2, kHalfWidth, kHalfHeight, push));
+  }
   std::puts("skate3_portal_math_test: ok");
   return 0;
 }

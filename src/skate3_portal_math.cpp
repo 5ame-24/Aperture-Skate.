@@ -68,6 +68,61 @@ bool RayThroughPortal(const Frame g[2], const float o[3], const float d[3], floa
   return best < 1e29f;
 }
 
+void RimProbe(const Frame& f, int k, const FitRules& rules, float o[3], float d[3], float dir2[2]) {
+  const float a = 6.2831853f * float(k) / float(kRimProbes);
+  dir2[0] = std::cos(a);
+  dir2[1] = std::sin(a);
+  const float lat = dir2[0] * kHalfWidth * rules.rim, vert = dir2[1] * kHalfHeight * rules.rim;
+  for (int c = 0; c < 3; ++c) {
+    o[c] = f.c[c] + lat * f.r[c] + vert * f.u[c] + rules.probe_front * f.n[c];
+    d[c] = -f.n[c];
+  }
+}
+
+bool RimProbeOk(const Frame& f, bool hit, const float hp[3], const float hn[3], const FitRules& rules) {
+  if (!hit) return false;
+  const float rel[3] = {hp[0] - f.c[0], hp[1] - f.c[1], hp[2] - f.c[2]};
+  return std::abs(Dot(rel, f.n)) <= rules.plane_tol && Dot(hn, f.n) >= rules.normal_dot;
+}
+
+int FitShift(const bool ok[kRimProbes], const FitRules& rules, float shift[2]) {
+  float sx = 0, sy = 0;
+  int bad = 0;
+  for (int k = 0; k < kRimProbes; ++k) {
+    if (ok[k]) continue;
+    const float a = 6.2831853f * float(k) / float(kRimProbes);
+    sx += std::cos(a);
+    sy += std::sin(a);
+    ++bad;
+  }
+  shift[0] = shift[1] = 0;
+  if (bad == 0) return 0;
+  // opposite rim points both off the surface: moving cannot help
+  for (int k = 0; k < kRimProbes / 2; ++k)
+    if (!ok[k] && !ok[k + kRimProbes / 2]) return 2;
+  const float l = std::hypot(sx, sy);
+  if (l < 1e-4f) return 2;
+  shift[0] = -sx / l * rules.step;
+  shift[1] = -sy / l * rules.step;
+  return 1;
+}
+
+bool OverlapPush(const Frame& a, const Frame& b, float hw, float hh, float shift[3]) {
+  if (Dot(a.n, b.n) < 0.95f) return false;
+  const float d[3] = {b.c[0] - a.c[0], b.c[1] - a.c[1], b.c[2] - a.c[2]};
+  if (std::abs(Dot(d, a.n)) > 0.2f) return false;
+  float x = Dot(d, a.r), y = Dot(d, a.u);
+  float l = std::hypot(x, y);
+  if (l < 1e-3f) x = 1.0f, y = 0.0f, l = 0.0f;  // on top of each other: push along r
+  const float tx = l > 0 ? x / l : 1.0f, ty = l > 0 ? y / l : 0.0f;
+  // the oval's radius along (tx, ty); two equal ovals touch at twice that (exact along the axes, close in between)
+  const float rad = 1.0f / std::sqrt((tx / hw) * (tx / hw) + (ty / hh) * (ty / hh));
+  const float need = 2.0f * rad + 0.05f;
+  if (l >= need) return false;
+  for (int c = 0; c < 3; ++c) shift[c] = (tx * a.r[c] + ty * a.u[c]) * (need - l);
+  return true;
+}
+
 bool TestCrossing(const Frame g[2], const float prev[3], const float now[3], bool standing_ok, const Rules& rules, Crossing* out) {
   for (int i = 0; i < 2; ++i) {
     const Frame& e = g[i];

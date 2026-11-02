@@ -28,3 +28,8 @@ for r in rows:
 if scored:
     k = [st.mean(r["after"][4:8]) / r["speed"] for r in scored]
     print(f"{len(rows)} crossings, {len(scored)} scored: mean kept {100*st.mean(k):.0f}% median {100*st.median(k):.0f}%")
+    for mode in ("riding", "airborne"):
+        km = [st.mean(r["after"][4:8]) / r["speed"] for r in scored if r["mode"] == mode]
+        if km:
+            print(f"  {mode}: {len(km)} scored, mean kept {100*st.mean(km):.0f}% median {100*st.median(km):.0f}%"
+                  f"{'  (rolling crossings: the wall-exit lift, PROGRESS 69)' if mode == 'riding' else ''}")

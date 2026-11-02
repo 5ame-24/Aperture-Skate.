@@ -50,6 +50,11 @@ REXCVAR_DEFINE_DOUBLE(skate3_portal_gate_wall_exit, 0.0, "Skate 3",
                       "turned rates were cancelled one frame later, as if a wall probe saw the wall). 0 = on the plane.")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
+REXCVAR_DEFINE_BOOL(skate3_portal_gate_fit, true, "Skate 3",
+                    "Portal fitting, as in Portal: a new portal is pushed clear of the other one on the same surface, then nudged (up to "
+                    "4 rounds of 8 rim probe rays, 2 m at most) until its whole oval sits on the surface it was shot at. Log prefix PORTALFIT.")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
 REXCVAR_DEFINE_BOOL(skate3_portal_gate_hole, true, "Skate 3",
                     "Make the wall/floor non-solid inside an open portal (body collision is skipped there) and cross at the "
                     "real portal plane, exiting at the other portal's plane. Off = old behaviour: solid surface, crossing "
@@ -1075,6 +1080,23 @@ void FilterPad(uint16_t* buttons, uint8_t* left_trigger, uint8_t* right_trigger,
 
 void SetWallClear(float metres) { g_wall_clear = metres; }
 
+// Portal fitting state (PORTALFIT): one per portal; `gen` changes with every placement so a late answer for an old portal is ignored.
+struct Fit {
+  bool want = false, sent = false;
+  int round = 0;
+  float moved = 0.0f;
+  uint32_t gen = 0;
+  int64_t sent_ns = 0;
+};
+Fit g_fit[2];
+uint32_t g_fit_gen = 0;
+
+portal_math::Frame FrameOf(const Gate& g) {
+  portal_math::Frame f;
+  portal_math::SetFrame(f, g.c, g.n, g.u, g.trigger);
+  return f;
+}
+
 bool PlaceOn(int which, const float hit[3], const float normal[3], const float shot[3]) {
   const float nl = std::sqrt(Dot3(normal, normal));
   if (!(nl > 0.5f)) {
@@ -1120,6 +1142,19 @@ bool PlaceOn(int which, const float hit[3], const float normal[3], const float s
   for (int k = 0; k < 3; ++k) g.c[k] = hit[k] + n[k] * 0.05f;
   g.trigger = trigger;
   g_have_prev = false;
+  if (REXCVAR_GET(skate3_portal_gate_fit)) {
+    // never on top of the other portal: pushed just clear of it along the surface (Portal moves a new portal off the old one)
+    const Gate& other = g_gates[1 - which];
+    float push[3];
+    if (other.active && portal_math::OverlapPush(FrameOf(other), FrameOf(g), kHalfWidth, kHalfHeight, push)) {
+      for (int k = 0; k < 3; ++k) g.c[k] += push[k];
+      REXLOG_INFO("portal-gate: PORTALFIT {} pushed {:.2f} m clear of the {} portal", which ? "orange" : "blue",
+                  std::sqrt(Dot3(push, push)), which ? "blue" : "orange");
+    }
+    g_fit[which] = Fit{};
+    g_fit[which].want = true;
+    g_fit[which].gen = ++g_fit_gen;
+  }
   g_both_placed = g_gates[0].active && g_gates[1].active;
   const bool axis = std::abs(n[1]) >= 0.9999f || std::abs(n[1]) < 1e-4f;
   Sfx(which ? 1 : 0);
@@ -1128,6 +1163,64 @@ bool PlaceOn(int which, const float hit[3], const float normal[3], const float s
               g.Flat() ? (n[1] > 0 ? "floor" : "ceiling") : "wall", g.c[0], g.c[1], g.c[2], n[0], n[1], n[2],
               axis ? "" : " (angled)");
   return true;
+}
+
+bool FitRays(int* which, uint32_t* gen, float o[][3], float d[][3], float* len) {
+  std::lock_guard<std::mutex> lock(g_mutex);
+  for (int w = 0; w < 2; ++w) {
+    Fit& f = g_fit[w];
+    if (!f.want || !g_gates[w].active || (f.sent && now_ns() - f.sent_ns < 1'500'000'000ll)) continue;  // (no answer in 1.5 s: ask again)
+    const portal_math::Frame fr = FrameOf(g_gates[w]);
+    const portal_math::FitRules rules;
+    for (int k = 0; k < portal_math::kRimProbes; ++k) {
+      float dir2[2];
+      portal_math::RimProbe(fr, k, rules, o[k], d[k], dir2);
+    }
+    *len = rules.probe_len;
+    *which = w;
+    *gen = f.gen;
+    f.sent = true;
+    f.sent_ns = now_ns();
+    return true;
+  }
+  return false;
+}
+
+void FitResult(int which, uint32_t gen, const bool hit[], const float pos[][3], const float nrm[][3]) {
+  std::lock_guard<std::mutex> lock(g_mutex);
+  Fit& f = g_fit[which];
+  Gate& g = g_gates[which];
+  if (!f.want || f.gen != gen || !g.active) return;  // replaced or cleared meanwhile
+  const portal_math::Frame fr = FrameOf(g);
+  const portal_math::FitRules rules;
+  bool ok[portal_math::kRimProbes];
+  int bad = 0;
+  char pattern[portal_math::kRimProbes + 1] = {};
+  for (int k = 0; k < portal_math::kRimProbes; ++k) {
+    ok[k] = portal_math::RimProbeOk(fr, hit[k], pos[k], nrm[k], rules);
+    bad += !ok[k];
+    pattern[k] = ok[k] ? 'o' : (hit[k] ? 'x' : '-');  // o on the surface, x hit something else, - nothing within reach
+  }
+  float sh[2];
+  const int st = portal_math::FitShift(ok, rules, sh);
+  const char* name = which ? "orange" : "blue";
+  if (st == 0) {
+    REXLOG_INFO("portal-gate: PORTALFIT {} fits{} (round {}, moved {:.2f} m)", name, f.round ? " after nudging" : "", f.round + 1, f.moved);
+    f.want = false;
+    return;
+  }
+  if (st == 2 || f.round + 1 >= 4 || f.moved + rules.step > rules.max_total + 1e-3f) {
+    REXLOG_INFO("portal-gate: PORTALFIT {} {}: {} of {} rim points off the surface [{}] (kept where it is, moved {:.2f} m)", name,
+                st == 2 ? "does not fit (the surface is smaller than the portal)" : "best effort", bad, portal_math::kRimProbes, pattern, f.moved);
+    f.want = false;
+    return;
+  }
+  for (int k = 0; k < 3; ++k) g.c[k] += sh[0] * g.r[k] + sh[1] * g.u[k];
+  f.moved += rules.step;
+  ++f.round;
+  f.sent = false;  // probe again from the new place
+  g_have_prev = false;
+  REXLOG_INFO("portal-gate: PORTALFIT {} round {}: [{}] {} off, nudged ({:+.2f} across, {:+.2f} up)", name, f.round, pattern, bad, sh[0], sh[1]);
 }
 
 void PlaceAhead(int which, const float skater[3]) {

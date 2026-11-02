@@ -59,6 +59,9 @@ void SetWallClear(float metres);
 // (sets "up" on a floor or ceiling portal). False for slopes. Fallback when the ray finds nothing: PlaceAhead,
 // 7 m in front of the skater.
 bool PlaceOn(int which, const float hit[3], const float normal[3], const float shot[3]);
+// Portal fitting (skate3_portal_gate_fit): the 8 rim probe rays a newly placed portal wants answered (game thread, one batch), and their answers.
+bool FitRays(int* which, uint32_t* gen, float o[][3], float d[][3], float* len);
+void FitResult(int which, uint32_t gen, const bool hit[], const float pos[][3], const float nrm[][3]);
 void PlaceAhead(int which, const float skater[3]);
 
 struct Cross {

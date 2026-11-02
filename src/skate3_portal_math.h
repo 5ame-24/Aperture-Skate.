@@ -63,6 +63,28 @@ void ExitTarget(const float vout[3], const float fallback_dir[2], const float po
 // other portal (0.05 m in front of it) and out_d = the turned direction. The nearest portal wins.
 bool RayThroughPortal(const Frame g[2], const float o[3], const float d[3], float hit_t, float slack, int* from, float out_o[3], float out_d[3]);
 
+// ---- Portal fitting (Portal places a portal fully on its surface: it is nudged off edges and corners, and never overlaps the other) ----
+struct FitRules {
+  float rim = 0.92f;        // rim probes sit at this fraction of the oval
+  float probe_front = 0.5f; // a probe starts this far in front of the plane and looks back into it ...
+  float probe_len = 1.0f;   // ... this far
+  float plane_tol = 0.15f;  // the hit must be this close to the portal's plane
+  float normal_dot = 0.9f;  // and face the same way
+  float step = 0.35f;       // metres moved per round, away from the probes that missed
+  float max_total = 2.0f;   // at most this far from where it was shot
+};
+constexpr int kRimProbes = 8;
+// Rim probe k (0..kRimProbes-1): ray origin and direction (into the surface), and its in-plane direction (along r, u).
+void RimProbe(const Frame& f, int k, const FitRules& rules, float o[3], float d[3], float dir2[2]);
+// Did probe k find the portal's own surface (a hit on the plane, facing the same way)?
+bool RimProbeOk(const Frame& f, bool hit, const float hp[3], const float hn[3], const FitRules& rules);
+// 0 = every probe ok (fits), 1 = move by shift (r, u components, metres) away from the probes that missed, 2 = cannot fit (missed on opposite
+// sides: the surface is smaller than the portal).
+int FitShift(const bool ok[kRimProbes], const FitRules& rules, float shift[2]);
+// Two portals on the same surface may not overlap (ovals of half extents hw x hh): the in-plane shift (world) that moves `b` just clear of
+// `a`, or false when they are on different surfaces or already clear.
+bool OverlapPush(const Frame& a, const Frame& b, float hw, float hh, float shift[3]);
+
 // ---- Camera poses (portal camera carry) ----
 // A camera pose: world position and its axes. Row-vector view matrices (p_view = p_world * V, as the game and the native renderer
 // use) keep right/up/forward in columns 0/1/2 of the upper 3x3 and -pos . axis in row 3.

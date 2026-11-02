@@ -770,3 +770,17 @@ Actor offsets: +1200/+1216 ground pos, +1232 delta, +1248 velocity, +1296 flags,
       the selector stops skater updates, and the old scan waited for one); the skater-update path stays as a fallback.
     Gel droppers: cut after run 207 (rolled back locally by the tester); kept behind skate3_portal_gel_dropper (off), Ctrl+H is portals <->
     paint again.
+69. Core portal mechanics (built, untested).
+    - Rolling crossings: with the hole on (default) every exit had lift 0 (gate Step: `lift = hole ? 0`), so a crossing that started
+      ROLLING (riding flags) came out at ground level, back in the riding model, which drops restored / added velocity the same frame (the
+      gel-lift finding, run 197): why state-100 crossings kept ~45% while airborne ones kept 96%. Wall exits of rolling crossings now start
+      skate3_portal_gate_riding_lift (0.6 m) higher, airborne; FLING holds the exit velocity. Log `GATE [f N] rolling crossing: wall exit
+      lifted 0.60 m`. crossings.py now prints kept speed separately for riding and airborne crossings.
+    - Portal fitting (skate3_portal_gate_fit, on), as in Portal: (a) a new portal on the same surface as the other one is pushed just clear
+      of it (portal_math::OverlapPush: the oval's radius along the direction between them, x2 + 5 cm); (b) then up to 4 rounds of 8 rim
+      probe rays (0.92 of the oval, from 0.5 m in front, 1 m into the surface; all 8 in one ray batch, FitBatch, scratch below every other
+      ray's); a probe that misses or hits off the plane / another surface marks that side; the portal moves 0.35 m away from the marked
+      side (FitShift), 2 m at most; opposite sides both off = the surface is smaller than the portal (kept, logged). Logs `PORTALFIT blue
+      round k: [oooxx-oo] 3 off, nudged (...)` (o on the surface, x another surface, - nothing), `fits after nudging`, `does not fit`,
+      `best effort`, `pushed X m clear of the orange portal`. Answers wait at most 1.5 s, then the round is asked again.
+    - Unit tests: RimProbe / RimProbeOk / FitShift / OverlapPush.

@@ -74,6 +74,12 @@ REXCVAR_DEFINE_BOOL(skate3_portal_fling, true, "Skate 3",
                     "wall portal. Log prefix FLING.")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
+REXCVAR_DEFINE_DOUBLE(skate3_portal_gate_riding_lift, 0.6, "Skate 3",
+                      "Metres a crossing that starts ROLLING (on the ground) comes out above where it would, when it leaves through a wall portal: "
+                      "an exit that starts airborne keeps its speed, one at ground level goes back into the riding model, which drops "
+                      "the restored velocity (state-100 crossings kept ~45%, airborne ones 96%). 0 = off.")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
 REXCVAR_DEFINE_INT32(skate3_portal_fling_frames, 10, "Skate 3",
                      "How many frames after a crossing the FLING assist holds the exit speed.")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
@@ -772,6 +778,89 @@ void CollectBlobRay(PPCContext& ctx, uint8_t* base) {
     r[10] = -r[10];
   }
   skate3::portal_gel::OnBlobRay(g_blob_ray.blob, hit, r, r + 8);
+}
+
+// PORTALFIT: a new portal's 8 rim probe rays, submitted together in one Start and collected at End. Their vectors sit below every other
+// scratch (gun 0, cube 128, blob 256): 512 + 48 k, and every call's stack starts below all of them, so no call can overwrite a ray that is
+// still queued.
+struct FitBatch {
+  std::atomic<int> state{0};  // 0 idle, 1 wanted, 2 submitted
+  int which = 0, n = 0;
+  uint32_t gen = 0;
+  float o[8][3] = {}, d[8][3] = {}, len = 1.0f;
+  uint32_t handle[8] = {};
+  uint32_t mgr = 0, this_ptr = 0;
+  int age = 0;
+};
+FitBatch g_fit_batch;
+constexpr uint32_t kFitScratch = 512, kFitStack = 512 + 48 * 8 + 256;
+
+void SubmitFitRays(PPCContext& ctx, uint8_t* base, uint32_t self) {
+  uint32_t mgr = 0;
+  const uint32_t filter = g_start_filter;
+  if (!ReadBe32(base, self + 1908, &mgr) || !mgr || filter == 0xFFFFFFFFu) {
+    g_fit_batch.state = 0;
+    return;
+  }
+  const SavedRegs saved(ctx);
+  const uint32_t top = (saved.r1 - 2048) & ~0xFu;
+  for (int k = 0; k < g_fit_batch.n; ++k) {
+    const uint32_t scratch = top - kFitScratch - 48 * uint32_t(k);
+    const auto& o = g_fit_batch.o[k];
+    const auto& d = g_fit_batch.d[k];
+    const float L = g_fit_batch.len;
+    const float vecs[12] = {o[0], o[1], o[2], 1.0f, d[0] * L, d[1] * L, d[2] * L, 0.0f, 0, 0, 0, 0};
+    WriteBeFloats(base, scratch, vecs, 12);
+    ctx.r1.u32 = top - kFitStack;
+    ctx.r3.u32 = mgr;
+    ctx.r4.u32 = scratch;
+    ctx.r5.u32 = scratch + 16;
+    ctx.r6.u32 = scratch + 32;
+    ctx.r7.u32 = filter;
+    sub_82E0B4E0(ctx, base);
+    g_fit_batch.handle[k] = ctx.r3.u32;
+  }
+  saved.Restore(ctx);
+  g_fit_batch.mgr = mgr;
+  g_fit_batch.this_ptr = self;
+  g_fit_batch.state = 2;
+}
+
+void CollectFitRays(PPCContext& ctx, uint8_t* base) {
+  const SavedRegs saved(ctx);
+  const uint32_t top = (saved.r1 - 2048) & ~0xFu;
+  bool hit[8] = {};
+  float pos[8][3] = {}, nrm[8][3] = {};
+  uint32_t service = 0, vtable = 0, fn = 0;
+  const bool callable = ReadBe32(base, g_fit_batch.mgr + 4, &service) && ReadBe32(base, service, &vtable) && ReadBe32(base, vtable + 32, &fn) &&
+                        fn >= 0x82000000 && fn < 0x83000000;
+  for (int k = 0; k < g_fit_batch.n && callable; ++k) {
+    ctx.r1.u32 = top - kFitStack;
+    ctx.r3.u32 = service;
+    ctx.r4.u32 = g_fit_batch.handle[k];
+    ctx.ctr.u32 = fn;
+    ctx.lr = 0;
+    t_gun_query = true;  // our own query: the portal hole must not cut it (it looks at the portal's own surface)
+    REX_CALL_INDIRECT_FUNC(ctx.ctr.u32);
+    t_gun_query = false;
+    const uint32_t res = ctx.r3.u32;
+    uint32_t raw[16];
+    if (res >= 0x10000 && res < 0xC0000000 && skate3::native_scene::GuestTryCopy(raw, base + res, sizeof(raw))) {
+      float r[16];
+      for (int i = 0; i < 16; ++i) r[i] = BeFloat(raw[i]);
+      hit[k] = r[12] >= 0.0f && std::isfinite(r[0]) && std::isfinite(r[8]);
+      const auto& d = g_fit_batch.d[k];
+      if (hit[k] && r[8] * d[0] + r[9] * d[1] + r[10] * d[2] > 0.0f) r[8] = -r[8], r[9] = -r[9], r[10] = -r[10];
+      for (int c = 0; c < 3; ++c) pos[k][c] = r[c], nrm[k][c] = r[8 + c];
+    }
+  }
+  saved.Restore(ctx);
+  g_fit_batch.state = 0;
+  if (!callable) {
+    REXLOG_INFO("portal-probe: PORTALFIT rim probes: ray results not readable");
+    return;
+  }
+  skate3::portal_gate::FitResult(g_fit_batch.which, g_fit_batch.gen, hit, pos, nrm);
 }
 
 constexpr uint32_t kLinRates = 0x140;
@@ -1829,6 +1918,16 @@ bool GateStep(PPCContext& ctx, uint8_t* base, uint32_t self) {
     if (have && skate3::native_entity::SkaterWorldPosNear(base, tracked, 4.0f, head)) skate3::portal_gate::SetHead(head);
   }
   GunStep(have ? tracked : place_pos);
+  if (g_fit_batch.state == 0) {
+    if (skate3::portal_gate::FitRays(&g_fit_batch.which, &g_fit_batch.gen, g_fit_batch.o, g_fit_batch.d, &g_fit_batch.len)) {
+      g_fit_batch.n = skate3::portal_math::kRimProbes;
+      g_fit_batch.age = 0;
+      g_fit_batch.state = 1;
+    }
+  } else if (++g_fit_batch.age > 30) {
+    g_fit_batch.state = 0;  // never reached Start/End
+    REXLOG_INFO("portal-probe: PORTALFIT rim probes timed out (no ray batch for 30 updates)");
+  }
   PublishCharacters(base, riding ? place_pos : (have ? tracked : place_pos), riding,
                     have ? std::hypot(place_pos[0] - last[0], place_pos[2] - last[2]) : 0.0f);
   float p[3];
@@ -2250,6 +2349,14 @@ bool GateStep(PPCContext& ctx, uint8_t* base, uint32_t self) {
   // logged crossings, all ~1 m up, kept 7-9 m/s; both ground-level ones lost it).
   constexpr float kExitLift = 1.0f;
   float feet_y = cross.exit_pos[1] - up_offset + kExitLift * cross.lift;
+  // Rolling into a portal (riding flags): with the hole every exit has lift 0, so a rolling crossing came out at ground level, back in the
+  // riding model, which drops added or restored velocity the same frame (the gel lift finding, run 197). Out of a wall portal it now starts
+  // a little above, airborne, and FLING holds the exit velocity until it lands. Floor exits keep EXITFIX's own height (they fly up anyway).
+  const float riding_lift = float(REXCVAR_GET(skate3_portal_gate_riding_lift));
+  if (riding && riding_lift > 0.0f && std::abs(cross.exit_n[1]) < 0.7f) {
+    feet_y += riding_lift;
+    REXLOG_INFO("portal-probe: GATE [f {}] rolling crossing: wall exit lifted {:.2f} m (an airborne exit keeps its speed)", g_gate_frame, riding_lift);
+  }
   // The exit point is the entity centre (~0.85 m above the feet). With the hole a floor exit comes out depth + 0.02 above the plane, so the
   // feet started up to 0.83 m INSIDE the floor and the skater sank or fell through once off the opening (run 181). Feet go on the floor plane;
   // for a ceiling exit the head stays under it.
@@ -4115,6 +4222,9 @@ extern "C" REX_FUNC(sub_82DB63C0) {
   if (g_blob_ray.state == 1) {
     SubmitBlobRay(ctx, base, self);
   }
+  if (g_fit_batch.state == 1) {
+    SubmitFitRays(ctx, base, self);
+  }
 }
 
 extern "C" REX_FUNC(sub_82DB6580) {
@@ -4128,6 +4238,9 @@ extern "C" REX_FUNC(sub_82DB6580) {
   }
   if (g_blob_ray.state == 2 && self == g_blob_ray.this_ptr) {
     CollectBlobRay(ctx, base);
+  }
+  if (g_fit_batch.state == 2 && self == g_fit_batch.this_ptr) {
+    CollectFitRays(ctx, base);
   }
 }
 
