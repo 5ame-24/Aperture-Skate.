@@ -62,8 +62,8 @@ REXCVAR_DEFINE_BOOL(skate3_portal_npc, false, "Skate 3",
                     "relocation the human uses (board moved with its rates kept and turned). Log prefix NPCX.")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
-REXCVAR_DEFINE_BOOL(skate3_portal_fling, false, "Skate 3",
-                    "Experiment: for a few frames after you go through a portal, keep your speed along the exit direction at what the portal "
+REXCVAR_DEFINE_BOOL(skate3_portal_fling, true, "Skate 3",
+                    "For a few frames after you go through a portal, keep your speed along the exit direction at what the portal "
                     "says it should be (entry velocity turned by the portal, minus gravity), so a fall into a floor portal flings you out of a "
                     "wall portal. Log prefix FLING.")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);

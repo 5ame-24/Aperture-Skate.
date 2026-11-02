@@ -583,4 +583,9 @@ Actor offsets: +1200/+1216 ground pos, +1232 delta, +1248 velocity, +1296 flags,
     - Camera carry (run 181: 59 started, 27 done, 0 cancelled): a crossing during an active carry replaced it without a log, and the pose ring
       was not fed while carrying (the 8 "no pose recorded"). Now `PCAM carry superseded (crossing a -> b)` and the ring is fed with the shown
       pose, so the next carry chains from what was on screen; turning the portals off mid-carry logs `carry cancelled`.
+56. Handoff rule (docs/handoff-loop.md, 2026-11-02): one feature per round, ON by default, plain test command. Run 192 tested the fling with
+    `skate3_portal_fling` off (FLING armed 0), so this round's feature is FLING and the cvar now defaults to TRUE (the off switch stays:
+    `--skate3_portal_fling=false`). `skate3_portal_npc` and `skate3_portal_camcarry` stay OFF until their round. The always-on fixes of
+    section 55 (characters not props, EXITFIX, sinking crossing) are unchanged. Spec requests R6-R8 (backwards-man speed, first-person mod,
+    first person sticking on foot) are with the analysis side; nothing built for them.
 
