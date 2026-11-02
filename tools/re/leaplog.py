@@ -40,7 +40,7 @@ for line in open(path, errors="replace"):
                 "FPVTRACK re-acquired", "FPVTRACK lost", "FPVTRACK human entity locked", "unlocked", "FPVTRACK locked entity", "FPVTRACK refused",
                 "FPVTRACK ignored", "FPVTRACK accepted", "FLING not armed: crossing off the board",
                 "GEL mode ON", "GEL painted", "GEL cleared", "GEL shot hit nothing", "GEL bounce on blue", "bounce held by FLING", "result: rose",
-                "never left the ground", "on orange", "left orange", "GEL prop", "GEL skipped: on foot", "AIR loaded", "AIR no saved"):
+                "never left the ground", "on orange", "left orange", "GEL prop", "GEL skipped: on foot", "shot went into the", "GEL drawn in the world", "AIR loaded", "AIR no saved"):
         if tag in line:
             other[tag] += 1
     if "PCAM" in line:

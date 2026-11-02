@@ -467,6 +467,25 @@ int main() {
       }
     }
   }
+  {
+    // a shot into the blue portal on a wall (facing +z at z = 0) comes out of the orange one on the floor (facing up at y = 10), going up
+    Frame g[2];
+    const float c0[3] = {0, 1, 0}, n0[3] = {0, 0, 1}, u0[3] = {0, 1, 0};
+    const float c1[3] = {20, 10, 0}, n1[3] = {0, 1, 0}, u1[3] = {0, 0, 1};
+    SetFrame(g[0], c0, n0, u0, 0.0f);
+    SetFrame(g[1], c1, n1, u1, 0.0f);
+    const float o[3] = {0.5f, 1.2f, 10.0f}, d[3] = {0, 0, -1};
+    int from = -1;
+    float oo[3], od[3];
+    CHECK(RayThroughPortal(g, o, d, 10.0f, 0.3f, &from, oo, od));
+    CHECK(from == 0 && Near(od[1], 1.0f, 1e-5f) && Near(oo[1], 10.05f, 1e-4f) && Near(oo[0], 20.5f, 1e-4f) && Near(oo[2], 0.2f, 1e-4f));
+    // outside the oval, from behind, or hit something before the portal: no
+    const float wide[3] = {4.0f, 1.0f, 10.0f}, behind[3] = {0, 1, -10};
+    const float back[3] = {0, 0, 1};
+    CHECK(!RayThroughPortal(g, wide, d, 10.0f, 0.3f, &from, oo, od));
+    CHECK(!RayThroughPortal(g, behind, back, 10.0f, 0.3f, &from, oo, od));
+    CHECK(!RayThroughPortal(g, o, d, 5.0f, 0.3f, &from, oo, od));
+  }
   std::puts("skate3_portal_math_test: ok");
   return 0;
 }

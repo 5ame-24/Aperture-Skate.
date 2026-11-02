@@ -672,3 +672,6 @@ Actor offsets: +1200/+1216 ground pos, +1232 delta, +1248 velocity, +1296 flags,
       no z-write, portal rim textures), from portal_math::GelRing (tested; shared with the overlay). `GEL drawn in the world: n of m
       splats (renderer)` (first 3 frames); the overlay stands down while the renderer draws them. NOT COMPILED HERE (SDK headers absent):
       if the Mac build fails, the error is in that block.
+    - Gel through portals: a gel shot that passes into an opening before it hits (portal_math::RayThroughPortal, tested) is shot again
+      out of the other portal along the turned direction, up to 2 hops (`GEL [f N] shot went into the blue portal ...; shooting on out
+      of the orange one ..., hop k`). Portal shots are not passed through (as in Portal).

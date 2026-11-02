@@ -437,6 +437,7 @@ struct RayReq {
   bool free_aim = false;  // aimed with the mouse reticle: no wall under it means no portal, not a fallback
   uint32_t this_ptr = 0, handle = 0, mgr = 0;
   int age = 0;
+  int hops = 0;  // gel shots passed on through a portal (re-shot from the other one)
 };
 RayReq g_ray;
 thread_local bool t_gun_query = false;  // inside our own gun shot: never cut the opening out of it
@@ -503,6 +504,7 @@ void GunStep(const float skater[3]) {
     }
     std::copy(skater, skater + 3, g_ray.fallback);
     g_ray.age = 0;
+    g_ray.hops = 0;
     g_ray.state = 1;
     return;
   }
@@ -594,6 +596,25 @@ void CollectRay(PPCContext& ctx, uint8_t* base) {
     REXLOG_INFO("portal-probe: GUN normal pointed along the shot; flipped to face the shooter");
   }
   if (skate3::portal_gel::Mode()) {  // gel mode: the shot paints instead of placing a portal (no fallback ring when it hits nothing)
+    // Gel goes through portals (Portal 2): a shot that passes into an opening before it hits is shot again out of the other portal.
+    skate3::portal_math::Frame pf[2];
+    const float hit_t = hit ? std::sqrt((r[0] - g_ray.o[0]) * (r[0] - g_ray.o[0]) + (r[1] - g_ray.o[1]) * (r[1] - g_ray.o[1]) +
+                                        (r[2] - g_ray.o[2]) * (r[2] - g_ray.o[2]))
+                            : 60.0f;
+    int from = -1;
+    float no[3], nd[3];
+    if (g_ray.hops < 2 && skate3::portal_gate::PortalPairFrames(pf) &&
+        skate3::portal_math::RayThroughPortal(pf, g_ray.o, g_ray.d, hit_t, 0.3f, &from, no, nd)) {
+      ++g_ray.hops;
+      REXLOG_INFO("portal-gel: GEL [f {}] shot went into the {} portal ({:.1f} m); shooting on out of the {} one from ({:.2f}, {:.2f}, {:.2f}) dir "
+                  "({:.2f}, {:.2f}, {:.2f}), hop {}", g_gate_frame, from ? "orange" : "blue", hit_t, from ? "blue" : "orange", no[0], no[1], no[2], nd[0],
+                  nd[1], nd[2], g_ray.hops);
+      std::copy(no, no + 3, g_ray.o);
+      std::copy(nd, nd + 3, g_ray.d);
+      g_ray.age = 0;
+      g_ray.state = 1;  // submitted with the next Start
+      return;
+    }
     if (hit) skate3::portal_gel::Paint(g_ray.which, r, r + 8, g_gate_frame);
     else REXLOG_INFO("portal-gel: GEL [f {}] shot hit nothing, no paint", g_gate_frame);
     return;

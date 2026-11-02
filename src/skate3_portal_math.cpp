@@ -45,6 +45,29 @@ void MapPoint(const Frame& x, float lat, float vert, float out_dist, float out[3
   for (int k = 0; k < 3; ++k) out[k] = x.c[k] - lat * x.r[k] + vert * x.u[k] + out_dist * x.n[k];
 }
 
+bool RayThroughPortal(const Frame g[2], const float o[3], const float d[3], float hit_t, float slack, int* from, float out_o[3], float out_d[3]) {
+  float best = 1e30f;
+  for (int i = 0; i < 2; ++i) {
+    const Frame& e = g[i];
+    const float dn = Dot(d, e.n);
+    if (dn > -1e-4f) continue;  // parallel, or entering from behind
+    const float rel[3] = {e.c[0] - o[0], e.c[1] - o[1], e.c[2] - o[2]};
+    const float t = Dot(rel, e.n) / dn;
+    if (t < 0.0f || t > hit_t + slack || t >= best) continue;
+    const float q[3] = {o[0] + d[0] * t, o[1] + d[1] * t, o[2] + d[2] * t};
+    float lat, vert, depth;
+    Local(e, q, &lat, &vert, &depth);
+    if (!InOval(lat, vert, 0.0f)) continue;
+    best = t;
+    *from = i;
+    MapPoint(g[1 - i], lat, vert, 0.05f, out_o);
+    float R[9];
+    PairRotation(e, g[1 - i], R);
+    Apply(R, d, out_d);
+  }
+  return best < 1e29f;
+}
+
 bool TestCrossing(const Frame g[2], const float prev[3], const float now[3], bool standing_ok, const Rules& rules, Crossing* out) {
   for (int i = 0; i < 2; ++i) {
     const Frame& e = g[i];

@@ -58,6 +58,11 @@ bool TestCrossing(const Frame g[2], const float prev[3], const float now[3], boo
 // facing the horizontal direction of `vout` (or `fallback_dir` when that is slower than 0.5 m/s), translation `pos`.
 void ExitTarget(const float vout[3], const float fallback_dir[2], const float pos[3], float target[16]);
 
+// A ray from o along unit d that hit something at distance hit_t: did it pass into a portal's opening first (front side, within `slack`
+// metres past the plane, since the shot hits the wall the portal sits on)? Then `from` = that portal, out_o = the same point just out of the
+// other portal (0.05 m in front of it) and out_d = the turned direction. The nearest portal wins.
+bool RayThroughPortal(const Frame g[2], const float o[3], const float d[3], float hit_t, float slack, int* from, float out_o[3], float out_d[3]);
+
 // ---- Camera poses (portal camera carry) ----
 // A camera pose: world position and its axes. Row-vector view matrices (p_view = p_world * V, as the game and the native renderer
 // use) keep right/up/forward in columns 0/1/2 of the upper 3x3 and -pos . axis in row 3.
