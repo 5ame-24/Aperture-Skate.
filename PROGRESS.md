@@ -844,3 +844,19 @@ Actor offsets: +1200/+1216 ground pos, +1232 delta, +1248 velocity, +1296 flags,
       shows whether the stick / WASD reach the filter. Note: "keys turn the camera, no inputs" is what the DRONE camera does (End key: it
       takes the keyboard and blocks game input); the freecam ENGAGED line now says drone or first person.
     - Merged portal-mashup (the tester's dropper rollback a0dcc57); the dropper's remains (cvar, Ctrl+Shift+H text) are gone.
+75. CONSISTENCY leap (user: "consistent with portal mechanics, and between on foot and on board; not the same fling every time, but
+    enough consistency to start thinking with portals"; built, untested). One crossing pipeline, the same rules in every state:
+    - THE RULES (what a player can learn): (1) speed in = speed out: v_out = R v_in, R the pair rotation, full 3D, any portal pair (Portal's
+      rule; capped at 80 m/s); (2) where you go in is where you come out: (lat, up) in the entry oval comes out at (-lat, up) of the exit;
+      (3) you face the way you were facing, turned through the pair (learned facing axis), else along the exit velocity; (4) you come out
+      AIRBORNE: a floor exit with any outward motion starts 1 m above the floor, a wall exit of a grounded entry (rolling or walking) 0.6 m
+      up; (5) the exit velocity is HELD until it sticks (on target 4 updates in a row, at least 6, at most 24), on the board and on foot alike.
+    - Entry velocity: measured from the game's stores at the crossing frame (board linear rates on the board, actor +1248 on foot), the
+      position estimate as the fallback when a store disagrees by more than max(3, 50%): `CONSISTENCY entry velocity from the board rates:
+      (...) X m/s; estimate (...) Y m/s, differ by D`.
+    - Hold: FLING converges (`FLING +k converged: on target n updates in a row, t top-ups, hold released`); skate3_portal_fling_frames is
+      now the cap (24). On foot it holds the actor velocity AND the skeleton carriers AIR learned (the character's own stores, as on the
+      board minus the board), measured from those carriers.
+    - Exits: the wall-exit lift now also applies to on-foot entries; any outward motion out of a floor exit starts airborne (was > 1.5 m/s).
+    - Scorecard every 5 crossings: `CONSISTENCY after N crossings (last 20 per kind): wall->wall: n, kept K% +- S, heading off H deg; ...`
+      (kept = horizontal speed vs the promise for mostly horizontal exits; vs the ballistic speed for steep ones, so gravity is not counted).
