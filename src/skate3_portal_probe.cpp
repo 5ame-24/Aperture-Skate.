@@ -845,6 +845,7 @@ struct Fling {
   float gravity = 9.81f;  // the AIR probe's measured value once 3+ clean arcs agree, else assumed
 };
 Fling g_fling;
+uint32_t g_gate_frame = 0;  // GateStep updates of the human (the [f N] in FPVTRACK and FLING lines, also drawn under the on-screen clock)
 std::atomic<uint32_t> g_human_entity{0};  // the human's presentation entity (nearest skater entity to the tracked point)
 
 void FlingFrame(uint8_t* base, uint32_t self) {
@@ -862,7 +863,7 @@ void FlingFrame(uint8_t* base, uint32_t self) {
     if (ReadVec(base, block + kLinRates + 16 * i, v) && !(std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]) < 1.5f * kMaxExitSpeed)) insane = true;
   }
   if (state == 500 || !have_block || insane) {
-    REXLOG_INFO("portal-probe: FLING +{} stopped ({}), {} top-ups", f.k, state == 500 ? "bailed" : "board unreadable or rates insane", f.topped);
+    REXLOG_INFO("portal-probe: FLING [f {}] +{} stopped ({}), {} top-ups", g_gate_frame, f.k, state == 500 ? "bailed" : "board unreadable or rates insane", f.topped);
     f.left = 0;
     return;
   }
@@ -881,12 +882,12 @@ void FlingFrame(uint8_t* base, uint32_t self) {
   for (float& c : mean) c /= float(n);
   const float along = mean[0] * f.dir[0] + mean[1] * f.dir[1] + mean[2] * f.dir[2];
   if (e_along < 1.0f) {
-    REXLOG_INFO("portal-probe: FLING +{} done: expected speed along the exit is down to {:.1f} m/s (gravity), {} top-ups", f.k, e_along, f.topped);
+    REXLOG_INFO("portal-probe: FLING [f {}] +{} done: expected speed along the exit is down to {:.1f} m/s (gravity), {} top-ups", g_gate_frame, f.k, e_along, f.topped);
     f.left = 0;
     return;
   }
   if (along >= 0.9f * e_along) {
-    REXLOG_INFO("portal-probe: FLING +{} ok: {:.1f} m/s along the exit (expected {:.1f}), state {}", f.k, along, e_along, state);
+    REXLOG_INFO("portal-probe: FLING [f {}] +{} ok: {:.1f} m/s along the exit (expected {:.1f}), state {}", g_gate_frame, f.k, along, e_along, state);
   } else {
     const float add = e_along - along;
     for (int i = 0; i < 7; ++i) {
@@ -915,11 +916,11 @@ void FlingFrame(uint8_t* base, uint32_t self) {
         ++skel_topped;
       }
     }
-    if (skel_topped) REXLOG_INFO("portal-probe: FLING +{} also topped up {} skeleton vectors (learned by AIR)", f.k, skel_topped);
-    REXLOG_INFO("portal-probe: FLING +{} topped up: {:.1f} -> {:.1f} m/s along the exit ({:.2f}, {:.2f}, {:.2f}), state {}", f.k, along, e_along,
+    if (skel_topped) REXLOG_INFO("portal-probe: FLING [f {}] +{} also topped up {} skeleton vectors (learned by AIR)", g_gate_frame, f.k, skel_topped);
+    REXLOG_INFO("portal-probe: FLING [f {}] +{} topped up: {:.1f} -> {:.1f} m/s along the exit ({:.2f}, {:.2f}, {:.2f}), state {}", g_gate_frame, f.k, along, e_along,
                 f.dir[0], f.dir[1], f.dir[2], state);
   }
-  if (f.left == 0) REXLOG_INFO("portal-probe: FLING window over after {} frames, {} top-ups", f.k, f.topped);
+  if (f.left == 0) REXLOG_INFO("portal-probe: FLING [f {}] window over after {} frames, {} top-ups", g_gate_frame, f.k, f.topped);
 }
 
 // ---- AIR probe (spec request R5, read-only): the game's gravity and the store that carries the airborne velocity ----
@@ -1229,10 +1230,13 @@ void FunnelStep(uint8_t* base, uint32_t self, const float p[3], const float v[3]
 // Publish the other characters (NPC skaters, pedestrians) for the hole and the prop code, and remember which entity is the human's.
 // The human's entity LOCK (used by the FPVTRACK re-acquire). Run 194: it was re-picked every frame as "the nearest skater entity within 1.5 m
 // of the tracked point", so one wrong pick followed itself 50-160 m across the map. Now it is only chosen from RIDING frames (the actor's
-// ground position is authoritative there), must win 30 riding frames in a row, prefers the rider class (SkaterPresEntity), never changes
-// off the board, and is dropped when it jumps > 5 m in one frame while the skater did not (a pooled / reused entity).
+// ground position is authoritative there), must win 30 riding frames in a row, prefers the rider class (SkaterPresEntity) and never changes
+// off the board.
+// Run 196: dropping the lock when the entity jumped > 5 m in one frame flipped it 12 times, always re-taking the same entity (491AE6C0) a few
+// seconds later: the right entity does make one-frame jumps. A jump is now only counted and logged. The lock is dropped only when the skater's
+// own position says it is wrong: 60 riding frames in a row with the entity more than 3 m from the riding position (or unreadable).
 uint32_t g_lock_pending = 0;
-int g_lock_frames = 0, g_lock_unstable = 0;
+int g_lock_frames = 0, g_lock_off = 0, g_lock_jumps = 0;
 float g_lock_last[3] = {};
 bool g_lock_have_last = false;
 
@@ -1252,34 +1256,50 @@ void PublishCharacters(uint8_t* base, const float human[3], bool riding, float h
       human_i = i;
     }
   }
-  const uint32_t locked = g_human_entity;
-  if (riding && human_i >= 0) {
+  if (riding && human_i >= 0 && !g_human_entity) {
     const uint32_t cand = ents[human_i].entity;
     g_lock_frames = cand == g_lock_pending ? g_lock_frames + 1 : 1;
     g_lock_pending = cand;
-    if (g_lock_frames >= 30 && cand != locked) {
+    if (g_lock_frames >= 30) {
       g_human_entity = cand;
       g_lock_have_last = false;
-      g_lock_unstable = 0;
-      REXLOG_INFO("portal-probe: FPVTRACK human entity locked: {:08X} ({}, {:.2f} m from the riding position for 30 frames){}", cand,
-                  best_rider ? "rider class" : "other skater class", best, locked ? " (replaces the previous lock)" : "");
+      g_lock_off = 0;
+      REXLOG_INFO("portal-probe: FPVTRACK [f {}] human entity locked: {:08X} ({}, {:.2f} m from the riding position for 30 frames)",
+                  g_gate_frame, cand, best_rider ? "rider class" : "other skater class", best);
     }
   }
-  // stability of the locked entity: a real rider never jumps > 5 m in one frame unless the skater did
   if (const uint32_t he = g_human_entity) {
     float q[3];
-    if (skate3::native_entity::CharacterWorldPos(base, he, q)) {
-      if (g_lock_have_last) {
-        const float jump = std::hypot(q[0] - g_lock_last[0], std::hypot(q[1] - g_lock_last[1], q[2] - g_lock_last[2]));
-        if (jump > 5.0f && human_step < 1.0f && ++g_lock_unstable >= 3) {
-          REXLOG_INFO("portal-probe: FPVTRACK human entity {:08X} unlocked: it jumped {:.1f} m in one frame while the skater moved {:.2f} m",
-                      he, jump, human_step);
-          g_human_entity = 0;
-          g_lock_frames = 0;
+    const bool readable = skate3::native_entity::CharacterWorldPos(base, he, q);
+    if (readable && g_lock_have_last) {
+      const float jump = std::hypot(q[0] - g_lock_last[0], std::hypot(q[1] - g_lock_last[1], q[2] - g_lock_last[2]));
+      if (jump > 5.0f) {
+        ++g_lock_jumps;
+        if (g_lock_jumps <= 20 || g_lock_jumps % 50 == 0) {
+          REXLOG_INFO("portal-probe: FPVTRACK [f {}] locked entity {:08X} moved {:.1f} m in one frame while the skater moved {:.2f} m "
+                      "(lock kept, {} such jumps)", g_gate_frame, he, jump, human_step, g_lock_jumps);
         }
       }
+    }
+    if (readable) {
       std::copy(q, q + 3, g_lock_last);
       g_lock_have_last = true;
+    }
+    // the only way out: while riding, the skater's own position disagrees with the entity for 2 s
+    if (riding) {
+      const float d = readable ? std::hypot(q[0] - human[0], std::hypot(q[1] - human[1], q[2] - human[2])) : 1e9f;
+      g_lock_off = d > 3.0f ? g_lock_off + 1 : 0;
+      if (g_lock_off >= 60) {
+        if (readable) {
+          REXLOG_INFO("portal-probe: FPVTRACK [f {}] human entity {:08X} unlocked: {:.1f} m from the riding position for 60 riding frames",
+                      g_gate_frame, he, d);
+        } else {
+          REXLOG_INFO("portal-probe: FPVTRACK [f {}] human entity {:08X} unlocked: unreadable for 60 riding frames", g_gate_frame, he);
+        }
+        g_human_entity = 0;
+        g_lock_frames = 0;
+        g_lock_off = 0;
+      }
     }
   }
   float pos[48][3];
@@ -1307,6 +1327,7 @@ float g_track_exit[3] = {};
 
 bool GateStep(PPCContext& ctx, uint8_t* base, uint32_t self) {
   if (g_track_since_cross < 1000) ++g_track_since_cross;
+  skate3::portal_gate::SetGameFrame(++g_gate_frame);
   const uint32_t sp = ctx.r1.u32;
   static float tracked[3], last[3];
   static bool have = false;
@@ -1360,19 +1381,19 @@ bool GateStep(PPCContext& ctx, uint8_t* base, uint32_t self) {
         why = "entity too far from where the skater was";
         static int logged_far = 0;
         if (logged_far++ < 20) {
-          REXLOG_INFO("portal-probe: FPVTRACK refused a re-acquire: entity {:08X} at ({:.2f}, {:.2f}, {:.2f}) is {:.1f} m from the last good "
-                      "position (limit {:.1f} m, {} lost frames)", he, q[0], q[1], q[2], d, limit, g_track_lost);
+          REXLOG_INFO("portal-probe: FPVTRACK [f {}] refused a re-acquire: entity {:08X} at ({:.2f}, {:.2f}, {:.2f}) is {:.1f} m from the last good "
+                      "position (limit {:.1f} m, {} lost frames)", g_gate_frame, he, q[0], q[1], q[2], d, limit, g_track_lost);
         }
       }
     }
     if (!ok) {
-      if (g_track_lost == 30) REXLOG_INFO("portal-probe: FPVTRACK lost the skater for 30 frames (not riding; {})", why ? why : "?");
+      if (g_track_lost == 30) REXLOG_INFO("portal-probe: FPVTRACK [f {}] lost the skater for 30 frames (not riding; {})", g_gate_frame, why ? why : "?");
       return false;
     }
     std::copy(q, q + 3, p);
     static int logged = 0;
     if (logged++ < 40) {
-      REXLOG_INFO("portal-probe: FPVTRACK re-acquired the skater through its entity at ({:.2f}, {:.2f}, {:.2f}) after {} lost frames, flags {:08X}",
+      REXLOG_INFO("portal-probe: FPVTRACK [f {}] re-acquired the skater through its entity at ({:.2f}, {:.2f}, {:.2f}) after {} lost frames, flags {:08X}", g_gate_frame,
                   p[0], p[1], p[2], g_track_lost, flags);
     }
     g_track_lost = 0;
@@ -1390,12 +1411,12 @@ bool GateStep(PPCContext& ctx, uint8_t* base, uint32_t self) {
       static int logged_jump = 0;
       if (!riding || jump_frames < 10) {
         if (logged_jump++ < 20) {
-          REXLOG_INFO("portal-probe: FPVTRACK ignored a {:.1f} m jump of the tracked point ({}, flags {:08X})", jump, riding ? "riding" : "not riding",
+          REXLOG_INFO("portal-probe: FPVTRACK [f {}] ignored a {:.1f} m jump of the tracked point ({}, flags {:08X})", g_gate_frame, jump, riding ? "riding" : "not riding",
                       flags);
         }
         return false;
       }
-      REXLOG_INFO("portal-probe: FPVTRACK accepted a {:.1f} m relocation after {} riding frames", jump, jump_frames);
+      REXLOG_INFO("portal-probe: FPVTRACK [f {}] accepted a {:.1f} m relocation after {} riding frames", g_gate_frame, jump, jump_frames);
     }
     jump_frames = 0;
   }
@@ -1664,7 +1685,7 @@ bool GateStep(PPCContext& ctx, uint8_t* base, uint32_t self) {
   // Off the board the board is not under the skater: topping up its rates would launch the loose board, not the player. The on-foot
   // velocity store is unknown (AIR's state histogram and spec request R9), so no FLING there.
   if (ok && REXCVAR_GET(skate3_portal_fling) && state_at_cross == 500) {
-    REXLOG_INFO("portal-probe: FLING not armed: crossing off the board (state 500, on foot or bailed)");
+    REXLOG_INFO("portal-probe: FLING [f {}] not armed: crossing off the board (state 500, on foot or bailed)", g_gate_frame);
   } else if (ok && REXCVAR_GET(skate3_portal_fling)) {
     float vo[3];
     Turn(cross.vel, vel3, vo);
@@ -1680,11 +1701,11 @@ bool GateStep(PPCContext& ctx, uint8_t* base, uint32_t self) {
       g_fling.t0 = std::chrono::steady_clock::now().time_since_epoch().count();
       const bool measured = g_air_gravity_n.load() >= 3;
       if (measured) g_fling.gravity = g_air_gravity.load();
-      REXLOG_INFO("portal-probe: FLING armed: v_in ({:.1f}, {:.1f}, {:.1f}) -> v_out ({:.1f}, {:.1f}, {:.1f}) {:.1f} m/s for {} frames, gravity {:.2f} ({})",
+      REXLOG_INFO("portal-probe: FLING [f {}] armed: v_in ({:.1f}, {:.1f}, {:.1f}) -> v_out ({:.1f}, {:.1f}, {:.1f}) {:.1f} m/s for {} frames, gravity {:.2f} ({})", g_gate_frame,
                   vel3[0], vel3[1], vel3[2], g_fling.vout[0], g_fling.vout[1], g_fling.vout[2], g_fling.speed, g_fling.left, g_fling.gravity,
                   measured ? "measured by AIR" : "assumed");
     } else {
-      REXLOG_INFO("portal-probe: FLING not armed: exit speed {:.1f} m/s (too slow to hold)", sp_out);
+      REXLOG_INFO("portal-probe: FLING [f {}] not armed: exit speed {:.1f} m/s (too slow to hold)", g_gate_frame, sp_out);
     }
   }
   REXLOG_INFO("portal-probe: GATE teleport {}: feet target ({:.2f}, {:.2f}, {:.2f}) heading ({:.2f}, {:.2f})",

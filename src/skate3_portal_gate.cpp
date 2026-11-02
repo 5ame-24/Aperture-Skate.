@@ -965,6 +965,9 @@ bool FpvAutoYaw(double* yaw) {
   return true;
 }
 
+std::atomic<unsigned> g_game_frame{0};
+void SetGameFrame(unsigned frame) { g_game_frame.store(frame, std::memory_order_relaxed); }
+
 void SetHead(const float p[3]) {
   std::lock_guard<std::mutex> lock(g_mutex);
   std::copy(p, p + 3, g_head);
@@ -1273,6 +1276,11 @@ void Overlay::OnDraw(ImGuiIO& io) {
     std::snprintf(stamp, sizeof(stamp), "%02d:%02d:%02d.%03d", local.tm_hour, local.tm_min, local.tm_sec, ms);
     const ImVec2 sz = ImGui::CalcTextSize(stamp);
     ImGui::GetWindowDrawList()->AddText(ImVec2(io.DisplaySize.x - sz.x - 10.0f, 4.0f), IM_COL32(255, 255, 0, 255), stamp);
+    // the [f N] of the FPVTRACK / FLING log lines
+    char frame[24];
+    std::snprintf(frame, sizeof(frame), "f %u", g_game_frame.load(std::memory_order_relaxed));
+    const ImVec2 fs = ImGui::CalcTextSize(frame);
+    ImGui::GetWindowDrawList()->AddText(ImVec2(io.DisplaySize.x - fs.x - 10.0f, 6.0f + sz.y), IM_COL32(255, 255, 0, 255), frame);
   }
   std::shared_ptr<const native_scene::FrameScene> scene;
   {

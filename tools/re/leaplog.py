@@ -16,6 +16,7 @@ other = collections.Counter()
 pcam = collections.Counter()
 carries = []
 for line in open(path, errors="replace"):
+    line = re.sub(r"\[f \d+\] ", "", line)  # frame stamps on FPVTRACK / FLING lines (HANDOFF 6)
     if "NPCX" in line:
         if "NPCX actor" in line and "linked to skater entity" in line:
             linked.add(re.search(r"NPCX actor (\w+)", line).group(1))
@@ -36,7 +37,7 @@ for line in open(path, errors="replace"):
             follows[m.group(1)].append((int(m.group(2)), float(m.group(3)), float(m.group(4)), float(m.group(5))))
     for tag in ("FLING armed", "FLING not armed", "topped up", "FLING +", "EXITFIX", "portal-props: CHAR", "HOLE kept solid", "sinking through the opening", "CHARS ",
                 "AIR arc", "AIR arc too short", "AIR gravity estimate", "AIR skeleton carriers learned", "AIR off-board updates", "also topped up",
-                "FPVTRACK re-acquired", "FPVTRACK lost", "FPVTRACK human entity locked", "FPVTRACK human entity", "FPVTRACK refused",
+                "FPVTRACK re-acquired", "FPVTRACK lost", "FPVTRACK human entity locked", "unlocked", "FPVTRACK locked entity", "FPVTRACK refused",
                 "FPVTRACK ignored", "FPVTRACK accepted", "FLING not armed: crossing off the board"):
         if tag in line:
             other[tag] += 1

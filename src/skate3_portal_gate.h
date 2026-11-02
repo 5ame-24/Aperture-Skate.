@@ -46,6 +46,8 @@ void SetTravel(float dx, float dz, float speed);
 bool FpvAutoYaw(double* yaw);
 // The rider's own position (not the board's), from the entity helper; game thread.
 void SetHead(const float p[3]);
+// The human's GateStep update count (the [f N] in FPVTRACK / FLING log lines), drawn under the on-screen clock.
+void SetGameFrame(unsigned frame);
 
 // Gamepad (guest-facing pad state, called every poll). Hold Back = portal mode: RT fires blue, LT fires orange, Y
 // clears both, R3 toggles first person, the right stick looks (in first person). While Back is held those inputs
