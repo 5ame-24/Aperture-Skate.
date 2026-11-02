@@ -29,6 +29,8 @@ void ToggleCoop();  // Ctrl+Shift+0: the two co-op slots on the nearest NPCs
 // Ctrl+Shift+9: one read-only scan of guest memory for the game's own character-select names (CHARSEL lines, spec request R11).
 void RequestSelectorProbe();
 bool TakeSelectorProbe();
+// The probe registers how to start the scan at once (returns false when it cannot yet; then the request waits for a skater update).
+void SetSelectorProbeRunner(bool (*runner)());
 
 // Character slots panel (Ctrl+Shift+C, drawn by the portal overlay): slot s gets character c (portal_gun::Character, -1 = off). The same cvars
 // as Ctrl+0 / Ctrl+Shift+0, so the panel, the keys and the command line always agree.

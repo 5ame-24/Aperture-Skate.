@@ -757,3 +757,16 @@ Actor offsets: +1200/+1216 ground pos, +1232 delta, +1248 velocity, +1296 flags,
       "Shingo" in 24 places and the second (pointer) pass was cut short by quitting.
     - Freecam ENGAGED: not the new keys. The portal first person runs on the freecam path, so every first-person start (Ctrl+4, D-pad down
       + R3) logs it; the line now says which (`ENGAGED (portal first person: ...)` or `(drone camera: End key ...)`).
+68. Run 207 CHARSEL -> scan v3 (built, untested). Run 207: "Shingo" in 24 places, mostly dialogue; the two pointer hits sit in tables of
+    (string pointer, 32-bit ID) pairs (words "41867012 862BCC2E 4182A729 8637BA01"): the game's TEXT tables, not the character list. A list of
+    characters most likely names each entry by that text ID. The scan now:
+    - takes up to 64 places and checks standalone labels first (NUL before and after: a UI string like the selector's), marked in the log;
+    - for each table hit logs its rows (`table P row k at A: "text" words: ...`, 25 rows, standalone labels only, 400 row lines max) and
+      collects the table's text IDs (the word after each string pointer) into an ID -> text map;
+    - takes Shingo's candidate IDs (the word after / before each pointer to it), searches memory for them, and for each place logs the
+      words around it; where neighbours at one stride also hold known text IDs it logs `LOOKS LIKE A LIST: stride S` and every row
+      (`list A row k: "name" (ID) words ...`). That row is where a model / outfit reference next to the name should show.
+    - starts from the key (UI thread) with the renderer's guest base (native_scene::g_guest_base), so it runs with the selector open (run 206:
+      the selector stops skater updates, and the old scan waited for one); the skater-update path stays as a fallback.
+    Gel droppers: cut after run 207 (rolled back locally by the tester); kept behind skate3_portal_gel_dropper (off), Ctrl+H is portals <->
+    paint again.

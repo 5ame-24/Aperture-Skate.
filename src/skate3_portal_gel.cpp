@@ -17,6 +17,10 @@ REXCVAR_DEFINE_BOOL(skate3_portal_gel, true, "Skate 3",
                     "Y) removes the gel while gel mode is on. Log prefix GEL.")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
+REXCVAR_DEFINE_BOOL(skate3_portal_gel_dropper, false, "Skate 3",
+                    "Gel droppers (cut after run 207, kept for later): when on, Ctrl+H cycles portals -> paint -> dropper.")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
 REXCVAR_DEFINE_DOUBLE(skate3_portal_gel_bounce_height, 5.3, "Skate 3",
                       "Smallest height (m) blue gel on a floor launches you to (rolling onto it, or a small drop). Portal 2: 5.3 m "
                       "(bounce_paint_min_speed 500 under sv_gravity 600). Turned into a speed with the skater's measured gravity.")
@@ -101,8 +105,8 @@ void ToggleMode() {
   if (!g_mode.load()) {
     g_mode = true;
     g_dropper_mode = false;
-    REXLOG_INFO("portal-gel: GEL mode ON: the gun paints gel (blue bounce, orange speed); Ctrl+H again for droppers ({} patches painted)", Count());
-  } else if (!g_dropper_mode.load()) {
+    REXLOG_INFO("portal-gel: GEL mode ON: the gun paints gel (blue bounce, orange speed); Ctrl+H again for portals ({} patches painted)", Count());
+  } else if (!g_dropper_mode.load() && REXCVAR_GET(skate3_portal_gel_dropper)) {
     g_dropper_mode = true;
     REXLOG_INFO("portal-gel: GEL gun sub-mode: DROPPER (a shot places a gel dropper); Ctrl+H again for portals");
   } else {
@@ -317,7 +321,7 @@ void ClearStreams() {
   g_blobs.clear();
 }
 
-bool DropperMode() { return Mode() && g_dropper_mode.load(); }
+bool DropperMode() { return Mode() && g_dropper_mode.load() && REXCVAR_GET(skate3_portal_gel_dropper); }
 
 void ToggleDropperMode() {
   static std::atomic<int64_t> last{0};
@@ -352,7 +356,7 @@ void PlaceDropper(int kind, const float hit[3], const float normal[3], uint32_t 
 }
 
 void StreamStep(float dt, float gravity, const pm::Frame* portals, uint32_t frame) {
-  if (!Enabled()) return;
+  if (!Enabled() || !REXCVAR_GET(skate3_portal_gel_dropper)) return;
   struct PaintAt {
     int kind;
     float p[3], n[3];

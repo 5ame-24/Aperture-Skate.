@@ -31,6 +31,7 @@
 #include <rex/logging.h>
 
 #include "native/skate3_native_entity.h"
+#include "skate3_native_scene_state.h"
 #include "skate3_portal_chell.h"
 #include "skate3_portal_cube.h"
 #include "skate3_portal_gate.h"
@@ -1494,6 +1495,12 @@ bool CharselPrintable(const uint8_t* p, size_t n, bool utf16, std::string* out) 
   return out->size() >= 3;
 }
 
+std::string fmt_list_hint(int stride, int n) {
+  char b[96];
+  std::snprintf(b, sizeof(b), " LOOKS LIKE A LIST: stride %d bytes, %d neighbours hold known text IDs", stride, n);
+  return b;
+}
+
 void CharselScan(uint8_t* base, std::string names) {
   struct Range {
     uint32_t lo, hi;
@@ -1534,12 +1541,19 @@ void CharselScan(uint8_t* base, std::string names) {
     for_chunks([&](uint32_t a, const uint8_t* d) {
       for (int enc = 0; enc < 2; ++enc) {
         const std::string& needle = enc ? u16 : name;
-        for (uint32_t i = 0; i + needle.size() <= kChunk && hits.size() < 24; ++i) {
+        for (uint32_t i = 0; i + needle.size() <= kChunk && hits.size() < 64; ++i) {
           if (d[i] == uint8_t(needle[0]) && std::memcmp(d + i, needle.data(), needle.size()) == 0) hits.push_back({a + i, enc == 1});
         }
       }
     });
-    REXLOG_INFO("portal-probe: CHARSEL \"{}\": {} places in guest memory{}", name, hits.size(), hits.size() >= 24 ? " (first 24)" : "");
+    REXLOG_INFO("portal-probe: CHARSEL \"{}\": {} places in guest memory{}", name, hits.size(), hits.size() >= 64 ? " (first 64)" : "");
+    // standalone labels first (NUL on both sides: a UI string such as the selector's, not a line of dialogue), then the first 8
+    std::stable_partition(hits.begin(), hits.end(), [&](const std::pair<uint32_t, bool>& hp) {
+      uint8_t e0 = 1, e1 = 1;
+      skate3::native_scene::GuestTryCopy(&e0, base + hp.first - (hp.second ? 2 : 1), 1);
+      skate3::native_scene::GuestTryCopy(&e1, base + hp.first + uint32_t(hp.second ? 2 * name.size() + 1 : name.size()), 1);
+      return e0 == 0 && e1 == 0;
+    });
     if (hits.size() > 8) hits.resize(8);
     // each place first, before the slow pointer pass (run 200: the scan was stopped before any per-place line)
     std::vector<std::string> arounds(hits.size());
@@ -1599,12 +1613,38 @@ void CharselScan(uint8_t* base, std::string names) {
         }
       }
     }
+    auto word_at = [&](uint32_t at, uint32_t* w) {
+      uint8_t wb[4];
+      if (!skate3::native_scene::GuestTryCopy(wb, base + at, 4)) return false;
+      *w = (uint32_t(wb[0]) << 24) | (uint32_t(wb[1]) << 16) | (uint32_t(wb[2]) << 8) | wb[3];
+      return true;
+    };
+    auto row_line = [&](uint32_t row, uint32_t stride, std::string* out) {
+      out->clear();
+      for (uint32_t k = 0; k < stride / 4 && k < 16; ++k) {
+        uint32_t w = 0;
+        char wbuf[12];
+        std::snprintf(wbuf, sizeof(wbuf), " %08X", word_at(row + 4 * k, &w) ? w : 0xDEADDEADu);
+        *out += wbuf;
+      }
+    };
+    static int row_lines = 0;  // all rows logged in this scan (capped)
+    // Text IDs: the game's text tables pair each string pointer with a 32-bit ID (run 207: words "ptr id ptr id"). A character list most
+    // likely names its entry by that ID, not by a pointer to the text. id_text maps the IDs seen around each pointer back to their text.
+    std::unordered_map<uint32_t, std::string> id_text;
+    std::vector<uint32_t> shingo_ids;
     for (size_t hi = 0; hi < hits.size(); ++hi) {
       const uint32_t h = hits[hi].first;
       const bool utf16 = hits[hi].second;
       const std::vector<uint32_t>& refs = all_refs[hi];
       const std::string& around = arounds[hi];
-      REXLOG_INFO("portal-probe: CHARSEL \"{}\" at {:08X} ({}): [{}], {} pointers to it", name, h, utf16 ? "UTF-16BE" : "ASCII", around, refs.size());
+      // a standalone label (NUL before and after the name) is a UI string; text inside a sentence is dialogue
+      uint8_t edge[2] = {1, 1};
+      skate3::native_scene::GuestTryCopy(&edge[0], base + h - (utf16 ? 2 : 1), 1);
+      skate3::native_scene::GuestTryCopy(&edge[1], base + h + uint32_t(utf16 ? 2 * name.size() + 1 : name.size()), 1);
+      const bool standalone = edge[0] == 0 && edge[1] == 0;
+      REXLOG_INFO("portal-probe: CHARSEL \"{}\" at {:08X} ({}{}): [{}], {} pointers to it", name, h, utf16 ? "UTF-16BE" : "ASCII",
+                  standalone ? ", standalone label" : ", inside other text", around, refs.size());
       for (size_t ri = 0; ri < refs.size() && ri < 6; ++ri) {
         const uint32_t ref = refs[ri];
         uint32_t words[32] = {};
@@ -1621,7 +1661,11 @@ void CharselScan(uint8_t* base, std::string names) {
           line += wbuf;
         }
         REXLOG_INFO("portal-probe: CHARSEL   pointer at {:08X}, words -64..+64:{}", ref, line);
-        // a table? the stride at which other words also point at printable names
+        // the ID next to the pointer (the word after it; the word before as a second guess), when it is not itself a pointer
+        for (const uint32_t idw : {words[17], words[15]}) {
+          if (idw != 0 && !in_ranges(idw) && std::find(shingo_ids.begin(), shingo_ids.end(), idw) == shingo_ids.end()) shingo_ids.push_back(idw);
+        }
+        // a table? the stride at which other words also point at printable names; its rows are logged (index, name, words)
         int best_stride = 0, best_n = 0;
         std::string best_names;
         for (uint32_t stride = 4; stride <= 512; stride += 4) {
@@ -1630,13 +1674,11 @@ void CharselScan(uint8_t* base, std::string names) {
           for (int dir = -1; dir <= 1; dir += 2) {
             for (int k = 1; k <= 24; ++k) {
               const uint32_t at = ref + uint32_t(dir * k) * stride;
-              uint8_t wb[4];
-              if (!skate3::native_scene::GuestTryCopy(wb, base + at, 4)) break;
-              const uint32_t w = (uint32_t(wb[0]) << 24) | (uint32_t(wb[1]) << 16) | (uint32_t(wb[2]) << 8) | wb[3];
-              std::string s;
-              if (!in_ranges(w) || !read_str(w, &s)) break;
+              uint32_t w = 0;
+              std::string str;
+              if (!word_at(at, &w) || !in_ranges(w) || !read_str(w, &str)) break;
               ++n;
-              if (got.size() < 300) got += (got.empty() ? "" : ", ") + s;
+              if (got.size() < 300) got += (got.empty() ? "" : ", ") + str;
             }
           }
           if (n > best_n) best_n = n, best_stride = int(stride), best_names = got;
@@ -1644,12 +1686,112 @@ void CharselScan(uint8_t* base, std::string names) {
         if (best_n >= 2) {
           REXLOG_INFO("portal-probe: CHARSEL   looks like a table: stride {} bytes, {} neighbouring entries also name something: {}", best_stride, best_n,
                       best_names);
+          // the text IDs of this table (the word after each string pointer), for resolving IDs found elsewhere
+          for (int k = -2000; k <= 2000; ++k) {
+            const uint32_t at = ref + uint32_t(k * best_stride);
+            uint32_t ptr = 0, idw = 0;
+            std::string str;
+            if (!word_at(at, &ptr) || !in_ranges(ptr) || !word_at(at + 4, &idw) || idw == 0 || in_ranges(idw)) continue;
+            if (id_text.size() < 20000 && read_str(ptr, &str)) id_text.emplace(idw, str);
+          }
+          if (standalone) {
+            for (int k = -12; k <= 12 && row_lines < 400; ++k, ++row_lines) {
+              const uint32_t row = ref + uint32_t(k * best_stride);
+              uint32_t ptr = 0;
+              std::string str = "?", words_s;
+              if (word_at(row, &ptr) && in_ranges(ptr)) read_str(ptr, &str);
+              row_line(row, uint32_t(best_stride), &words_s);
+              REXLOG_INFO("portal-probe: CHARSEL   table {:08X} row {:+d} at {:08X}: \"{}\" words:{}", ref, k, row, str, words_s);
+            }
+          }
+        }
+      }
+    }
+    // Where else does Shingo's text ID appear? A table whose rows hold text IDs at the same offset (other characters' names) is the list.
+    REXLOG_INFO("portal-probe: CHARSEL \"{}\": candidate text IDs {} ({} IDs known from the text tables)", name, [&] {
+      std::string t;
+      for (uint32_t idw : shingo_ids) {
+        char b2[12];
+        std::snprintf(b2, sizeof(b2), " %08X", idw);
+        t += b2;
+      }
+      return t.empty() ? std::string(" none") : t;
+    }(), id_text.size());
+    if (!shingo_ids.empty() && shingo_ids.size() <= 16) {
+      std::vector<std::pair<uint32_t, uint32_t>> id_hits;  // address, id
+      for_chunks([&](uint32_t a, const uint8_t* d) {
+        for (uint32_t i = 0; i + 4 <= kChunk && id_hits.size() < 64; i += 4) {
+          const uint32_t w = (uint32_t(d[i]) << 24) | (uint32_t(d[i + 1]) << 16) | (uint32_t(d[i + 2]) << 8) | d[i + 3];
+          for (uint32_t idw : shingo_ids)
+            if (w == idw) id_hits.push_back({a + i, idw});
+        }
+      });
+      REXLOG_INFO("portal-probe: CHARSEL \"{}\": {} places hold one of its text IDs", name, id_hits.size());
+      int shown_ids = 0;
+      for (const auto& [at, idw] : id_hits) {
+        // rows of a list: neighbours at a fixed stride hold other known text IDs
+        int best_stride = 0, best_n = 0;
+        std::string best_names;
+        for (uint32_t stride = 8; stride <= 1024; stride += 4) {
+          int n = 0;
+          std::string got;
+          for (int dir = -1; dir <= 1; dir += 2) {
+            for (int k = 1; k <= 32; ++k) {
+              uint32_t w = 0;
+              if (!word_at(at + uint32_t(dir * k) * stride, &w)) break;
+              const auto it = id_text.find(w);
+              if (it == id_text.end()) break;
+              ++n;
+              if (got.size() < 300) got += (got.empty() ? "" : ", ") + it->second;
+            }
+          }
+          if (n > best_n) best_n = n, best_stride = int(stride), best_names = got;
+        }
+        const bool listy = best_n >= 3;
+        if (shown_ids++ < 24 || listy) {
+          std::string words_s;
+          row_line(at - 16, 48, &words_s);
+          REXLOG_INFO("portal-probe: CHARSEL   ID {:08X} at {:08X}{}{}; words -16..+32:{}", idw, at,
+                      listy ? fmt_list_hint(best_stride, best_n) : std::string(""), listy ? ": " + best_names : std::string(""), words_s);
+        }
+        if (listy) {
+          for (int k = -16; k <= 16 && row_lines < 400; ++k, ++row_lines) {
+            const uint32_t row = at + uint32_t(k * best_stride);
+            uint32_t w = 0;
+            std::string words_s;
+            row_line(row - 16, uint32_t(std::min(best_stride, 64)), &words_s);
+            const auto it = word_at(row, &w) ? id_text.find(w) : id_text.end();
+            REXLOG_INFO("portal-probe: CHARSEL   list {:08X} row {:+d}: \"{}\" (ID {:08X}) words from -16:{}", at, k,
+                        it != id_text.end() ? it->second : std::string("?"), w, words_s);
+          }
         }
       }
     }
   }
   REXLOG_INFO("portal-probe: CHARSEL done in {:.1f} s", std::chrono::duration<float>(std::chrono::steady_clock::now() - t0).count());
 }
+
+// Ctrl+Shift+9 starts the scan straight from the key (UI thread) with the base the renderer stores every frame: run 206, with the selector
+// open the skater never updates, so a scan queued for the next skater update never ran.
+std::atomic<bool> g_charsel_running{false};
+void StartCharselScan(uint8_t* base) {
+  if (!base) return;
+  if (g_charsel_running.exchange(true)) {
+    REXLOG_INFO("portal-probe: CHARSEL scan already running");
+    return;
+  }
+  std::thread([base, names = std::string(REXCVAR_GET(skate3_portal_charsel_names))] {
+    CharselScan(base, names);
+    g_charsel_running = false;
+  }).detach();
+}
+const bool g_charsel_runner_set = (skate3::portal_chell::SetSelectorProbeRunner([] {
+  uint8_t* base = skate3::native_scene::g_guest_base.load(std::memory_order_relaxed);
+  if (!base) return false;
+  REXLOG_INFO("portal-probe: CHARSEL scan started from the key (no skater update needed)");
+  StartCharselScan(base);
+  return true;
+}), true);
 
 // Tracking re-acquire (FPVTRACK): frames since the last crossing, its exit point, and frames without a usable position.
 int g_track_since_cross = 1000, g_track_lost = 0;
@@ -1658,17 +1800,7 @@ float g_track_exit[3] = {};
 bool GateStep(PPCContext& ctx, uint8_t* base, uint32_t self) {
   if (g_track_since_cross < 1000) ++g_track_since_cross;
   skate3::portal_gate::SetGameFrame(++g_gate_frame);
-  if (skate3::portal_chell::TakeSelectorProbe()) {
-    static std::atomic<bool> running{false};
-    if (!running.exchange(true)) {
-      std::thread([base, names = std::string(REXCVAR_GET(skate3_portal_charsel_names))] {
-        CharselScan(base, names);
-        running = false;
-      }).detach();
-    } else {
-      REXLOG_INFO("portal-probe: CHARSEL scan already running");
-    }
-  }
+  if (skate3::portal_chell::TakeSelectorProbe()) StartCharselScan(base);  // (fallback: no renderer frame had stored the guest base yet)
   static bool air_loaded = false;
   if (!air_loaded) {
     air_loaded = true;
