@@ -52,7 +52,10 @@ void SetGameFrame(unsigned frame);
 // Gamepad (guest-facing pad state, called every poll). Hold Back = portal mode: RT fires blue, LT fires orange, Y
 // clears both, R3 toggles first person, the right stick looks (in first person). While Back is held those inputs
 // are removed from what the game sees, so a shot never also grabs or flips.
-void FilterPad(uint16_t* buttons, uint8_t* left_trigger, uint8_t* right_trigger, int16_t* rx, int16_t* ry);
+void FilterPad(uint16_t* buttons, uint8_t* left_trigger, uint8_t* right_trigger, int16_t* rx, int16_t* ry, int16_t* lx = nullptr, int16_t* ly = nullptr);
+// FPVWALK: the probe says whether the skater is on foot (state 500); the walking direction the stick asked for last (world, unit; false = none).
+void SetOnFoot(bool on_foot);
+bool WalkIntent(float dir[2], float* magnitude);
 // How far in front of a wall portal's trigger plane the skater comes out (test knob).
 void SetWallClear(float metres);
 // Put portal `which` on a surface: hit point, the surface normal facing the shooter, and the shot direction

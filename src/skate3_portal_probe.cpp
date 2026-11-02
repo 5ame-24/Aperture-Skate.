@@ -1953,6 +1953,56 @@ float HeadingDeg(float ax, float az, float bx, float bz) {
   return std::acos(std::clamp((ax * bx + az * bz) / (la * lb), -1.0f, 1.0f)) * 57.29578f;
 }
 
+// FPVWALK self-check: on foot in first person with the stick pushed, how far is the walking direction from the direction asked for (the stick
+// read relative to the shown view)? Logged every 5 s with samples. And WALK (spec request R9): which actor / skeleton vectors carry the
+// on-foot velocity, so a portal can keep it (the board's stores do not apply on foot).
+struct WalkCheck {
+  int n = 0;
+  double err_sum = 0;
+  float err_max = 0;
+  int64_t last_log = 0;
+} g_walk_check;
+struct WalkScan {
+  int scans = 0;
+  std::unordered_map<uint32_t, int> actor_hits, skel_hits;  // byte offset -> scans it matched in
+  bool reported = false;
+} g_walk_scan;
+void WalkScanStep(uint8_t* base, uint32_t self, const float v[3]) {
+  if (g_walk_scan.reported) return;
+  const float sp = std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+  if (sp < 1.2f) return;
+  auto scan = [&](uint32_t start, uint32_t bytes, std::unordered_map<uint32_t, int>& hits) {
+    std::vector<uint32_t> raw(bytes / 4);
+    if (start < 0x10000 || !skate3::native_scene::GuestTryCopy(raw.data(), base + start, bytes)) return;
+    for (uint32_t i = 0; i + 3 <= raw.size(); ++i) {
+      const float a[3] = {BeFloat(raw[i]), BeFloat(raw[i + 1]), BeFloat(raw[i + 2])};
+      const float d[3] = {a[0] - v[0], a[1] - v[1], a[2] - v[2]};
+      if (std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]) < std::max(0.4f, 0.15f * sp)) ++hits[i * 4];
+    }
+  };
+  uint32_t skel = 0;
+  ReadBe32(base, self + 1884, &skel);
+  scan(self, 0x800, g_walk_scan.actor_hits);
+  scan(skel, 0x4100, g_walk_scan.skel_hits);
+  if (++g_walk_scan.scans < 30) return;
+  g_walk_scan.reported = true;
+  auto top = [&](const std::unordered_map<uint32_t, int>& hits, const char* what) {
+    std::vector<std::pair<int, uint32_t>> v2;
+    for (const auto& [off, n] : hits)
+      if (n >= 15) v2.push_back({n, off});
+    std::sort(v2.rbegin(), v2.rend());
+    std::string line;
+    for (size_t i = 0; i < v2.size() && i < 10; ++i) {
+      char b[40];
+      std::snprintf(b, sizeof(b), " %s+0x%X %d/%d", what, v2[i].second, v2[i].first, g_walk_scan.scans);
+      line += b;
+    }
+    return line.empty() ? std::string(" none") : line;
+  };
+  REXLOG_INFO("portal-probe: WALK on-foot velocity carriers (vectors within 15% of the walking velocity in 15+ of {} scans): actor{}; skeleton{}",
+              g_walk_scan.scans, top(g_walk_scan.actor_hits, "actor"), top(g_walk_scan.skel_hits, "skeleton"));
+}
+
 float g_last_heading[2] = {0, 0};  // the skater's last horizontal travel direction with real speed (> 1 m/s), for vertical exits
 // FACING: which axis of the skater's presentation matrix is "forward" (learned while riding fast), so a crossing turns the real facing
 // through the pair (entering fakie or at an angle comes out the same way relative to the exit portal), not the travel direction.
@@ -2106,6 +2156,33 @@ bool GateStep(PPCContext& ctx, uint8_t* base, uint32_t self) {
       for (int c = 0; c < 3; ++c) vel3[c] += ((p[c] - last[c]) / dt - vel3[c]) * 0.5f;
       const float hv = std::hypot(vel3[0], vel3[2]);
       if (hv > 1.0f) g_last_heading[0] = vel3[0] / hv, g_last_heading[1] = vel3[2] / hv;
+      {
+        uint32_t wst = 0;
+        ReadBe32(base, self + 1336, &wst);
+        skate3::portal_gate::SetOnFoot(wst == 500);
+        if (wst == 500 && g_track_since_cross > 30) {
+          static int walk_scan_tick = 0;
+          if (walk_scan_tick++ % 10 == 0) WalkScanStep(base, self, vel3);
+          float want[2], mag = 0.0f;
+          if (skate3::portal_gate::WalkIntent(want, &mag) && mag > 0.6f && hv > 1.0f) {
+            const float e = HeadingDeg(vel3[0], vel3[2], want[0], want[1]);
+            if (e >= 0.0f) {
+              g_walk_check.err_sum += e;
+              g_walk_check.err_max = std::max(g_walk_check.err_max, e);
+              ++g_walk_check.n;
+            }
+          }
+          const int64_t now_c = std::chrono::steady_clock::now().time_since_epoch().count();
+          if (g_walk_check.n > 0 && now_c - g_walk_check.last_log > 5'000'000'000ll) {
+            g_walk_check.last_log = now_c;
+            REXLOG_INFO("portal-probe: FPVWALK [f {}] walking {:.0f} deg (mean, max {:.0f}) off the direction you push towards relative to your view, {} "
+                        "samples{}", g_gate_frame, g_walk_check.err_sum / g_walk_check.n, g_walk_check.err_max, g_walk_check.n,
+                        g_walk_check.err_sum / g_walk_check.n > 60.0 ? " - looks mirrored or unmapped" : "");
+            g_walk_check = WalkCheck{};
+            g_walk_check.last_log = now_c;
+          }
+        }
+      }
       if (g_check.active) {
         const uint32_t k = g_gate_frame - g_check.frame0;
         if ((k >= 10 && !g_check.done10) || k >= 20) {

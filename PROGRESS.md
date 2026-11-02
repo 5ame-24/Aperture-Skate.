@@ -819,3 +819,16 @@ Actor offsets: +1200/+1216 ground pos, +1232 delta, +1248 velocity, +1296 flags,
       renderer's surfaces (SurfaceShapes); the rim is thinner on small portals.
     - Fizzle: a shot that placed nothing shows an expanding ring with sparks at the reticle in that portal's colour (0.35 s).
     - skate3_portal_gate_fit_strict (off): Portal's rule, a portal that cannot fit is removed (fizzles) instead of kept.
+73. Portal walking in first person (user: "the walking mechanic from Portal present in FPV mode"; built, untested).
+    - FPVWALK (skate3_portal_fpv_walk, on): on foot (state 500) in portal first person, the left stick (and WASD, if the keyboard reaches
+      the game through the guest pad) moves you relative to where you LOOK, as in Portal. The game moves an on-foot skater relative to its
+      own third-person camera, which first person hides. The SetViewMatrix hook now keeps the game's own main-camera view before the
+      first-person rewrite (native_scene::GameCameraView; ShownCameraView = what you see); the pad filter (app_common passes the left
+      stick now) re-expresses the stick with portal_math::RemapStick (tested: both views' horizontal right / forward columns, so any sign
+      convention cancels). Riding is unchanged (the stick steers the board). Auto-centre is off while walking (it would chase strafes).
+    - Self-check: `FPVWALK walking X deg (mean, max) off the direction you push towards relative to your view, N samples` every 5 s
+      ("looks mirrored or unmapped" over 60 deg). No FPVWALK lines while walking in first person = the stick never reached the filter
+      (keyboard input that bypasses the guest pad).
+    - WALK probe (spec R9): while walking (> 1.2 m/s, 1 s clear of a crossing), 30 scans of actor +0..0x800 and skeleton +0..0x4100 for
+      vectors within 15% of the walking velocity; one line `WALK on-foot velocity carriers ... actor+0x... n/30; skeleton+0x... n/30`. That
+      store is what an on-foot portal crossing must turn and hold (Portal's on-foot flings), next round.

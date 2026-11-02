@@ -60,6 +60,11 @@ REXCVAR_DEFINE_DOUBLE(skate3_portal_gate_open_time, 0.25, "Skate 3",
                       "Seconds a new portal takes to open (it grows from its centre with a small overshoot, as in Portal); 0 = instant.")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
+REXCVAR_DEFINE_BOOL(skate3_portal_fpv_walk, true, "Skate 3",
+                    "Portal-style walking in first person: on foot, the left stick / WASD move relative to where you LOOK (the game moves you "
+                    "relative to its own hidden third-person camera). Riding is unchanged. Log prefix FPVWALK.")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
 REXCVAR_DEFINE_BOOL(skate3_portal_gate_fit_strict, false, "Skate 3",
                     "Portal's rule: a portal that cannot fit on its surface (the surface is smaller than the portal) is not placed (it fizzles). "
                     "Off = it stays where it was shot.")
@@ -669,6 +674,7 @@ void AimNdc(float* x, float* y) {
   }
 }
 
+std::atomic<bool> g_on_foot{false};  // FPVWALK: the skater is on foot (state 500), set by the probe
 std::atomic<int64_t> g_fizzle_ns{0};
 std::atomic<int> g_fizzle_which{0};
 void NoteFizzle(int which) {
@@ -1009,6 +1015,8 @@ void SetTravel(float dx, float dz, float speed) {
 
 bool FpvAutoYaw(double* yaw) {
   if (!REXCVAR_GET(skate3_portal_fpv_autocentre)) return false;
+  // on foot with FPVWALK you walk where you look (Portal): turning the view toward the walking direction would chase every strafe
+  if (REXCVAR_GET(skate3_portal_fpv_walk) && g_on_foot.load()) return false;
   const float x = g_travel_x, z = g_travel_z;
   if (g_travel_speed < 1.5f || std::hypot(x, z) < 0.001f) return false;
   if (now_ns() - g_look_ns.load() < 1'200'000'000) return false;  // the player is looking around: leave it
@@ -1044,7 +1052,38 @@ bool FpvHeadPos(float out[3]) {
   return true;
 }
 
-void FilterPad(uint16_t* buttons, uint8_t* left_trigger, uint8_t* right_trigger, int16_t* rx, int16_t* ry) {
+std::atomic<float> g_walk_dir_x{0.0f}, g_walk_dir_z{0.0f}, g_walk_mag{0.0f};
+void SetOnFoot(bool on_foot) { g_on_foot = on_foot; }
+bool WalkIntent(float dir[2], float* magnitude) {
+  *magnitude = g_walk_mag.load();
+  dir[0] = g_walk_dir_x.load();
+  dir[1] = g_walk_dir_z.load();
+  return *magnitude > 0.0f;
+}
+
+// FPVWALK: in portal first person on foot, the walking stick re-expressed relative to the shown view (portal_math::RemapStick).
+static void WalkRemap(int16_t* lx, int16_t* ly) {
+  g_walk_mag = 0.0f;
+  if (!lx || !ly || !REXCVAR_GET(skate3_portal_fpv_walk) || !FpvActive() || !g_on_foot.load()) return;
+  const float sx = float(*lx) / 32767.0f, sy = float(*ly) / 32767.0f;
+  const float mag = std::min(1.0f, std::hypot(sx, sy));
+  if (mag < 0.15f) return;
+  float game[16], shown[16];
+  if (!native_scene::GameCameraView(game) || !native_scene::ShownCameraView(shown)) return;
+  float ox, oy, wd[2];
+  if (!portal_math::RemapStick(game, shown, sx, sy, &ox, &oy, wd)) return;
+  // keep the stick's length (the remap is a rotation, but float noise must never push it past full deflection)
+  const float ol = std::hypot(ox, oy);
+  if (ol > 1e-4f) ox *= mag / ol, oy *= mag / ol;
+  *lx = int16_t(std::clamp(ox * 32767.0f, -32767.0f, 32767.0f));
+  *ly = int16_t(std::clamp(oy * 32767.0f, -32767.0f, 32767.0f));
+  g_walk_dir_x = wd[0];
+  g_walk_dir_z = wd[1];
+  g_walk_mag = mag;
+}
+
+void FilterPad(uint16_t* buttons, uint8_t* left_trigger, uint8_t* right_trigger, int16_t* rx, int16_t* ry, int16_t* lx, int16_t* ly) {
+  WalkRemap(lx, ly);
   constexpr uint16_t kY = 0x8000, kR3 = 0x0080, kX = 0x4000, kR1 = 0x0200, kB = 0x2000;  // XInput button bits
   static bool was_rt = false, was_lt = false, was_y = false, was_r3 = false, was_x = false, was_r1 = false, was_b = false;
   static auto last = std::chrono::steady_clock::now();

@@ -578,6 +578,31 @@ int main() {
     few.Add(I, t0);
     CHECK(!few.Best(&axis, &sign, &agree));
   }
+  {
+    // first-person walking: views with yaw a: forward (sin a, 0, cos a) in column 2, right (cos a, 0, -sin a) in column 0
+    auto view = [](float a, float v[16]) {
+      for (int i = 0; i < 16; ++i) v[i] = (i % 5 == 0) ? 1.0f : 0.0f;
+      v[0] = std::cos(a), v[4] = 0, v[8] = -std::sin(a);
+      v[1] = 0, v[5] = 1, v[9] = 0;
+      v[2] = std::sin(a), v[6] = 0, v[10] = std::cos(a);
+    };
+    float g[16], sh[16];
+    view(0.0f, g);
+    view(1.5707963f, sh);  // you look 90 degrees right of the game's camera
+    float ox, oy, wd[2];
+    CHECK(RemapStick(g, sh, 0.0f, 1.0f, &ox, &oy, wd));
+    CHECK(Near(ox, 1.0f, 1e-5f) && Near(oy, 0.0f, 1e-5f));  // "forward" becomes the game's "right" ...
+    CHECK(Near(wd[0], 1.0f, 1e-5f) && Near(wd[1], 0.0f, 1e-5f));  // ... which is where you look (world +x)
+    CHECK(RemapStick(g, sh, 1.0f, 0.0f, &ox, &oy, wd) && Near(ox, 0.0f, 1e-5f) && Near(oy, -1.0f, 1e-5f));  // your right = the game's back
+    view(0.3f, sh);
+    view(0.3f, g);
+    CHECK(RemapStick(g, sh, 0.4f, 0.7f, &ox, &oy, nullptr) && Near(ox, 0.4f, 1e-5f) && Near(oy, 0.7f, 1e-5f));  // same view: unchanged
+    // looking straight down: no horizontal forward, stick unchanged
+    float down[16];
+    view(0.0f, down);
+    down[2] = 0, down[6] = -1, down[10] = 0;
+    CHECK(!RemapStick(g, down, 0.0f, 1.0f, &ox, &oy, nullptr) && Near(oy, 1.0f));
+  }
   std::puts("skate3_portal_math_test: ok");
   return 0;
 }

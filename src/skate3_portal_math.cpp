@@ -151,6 +151,30 @@ bool FacingLearner::Best(int* axis, float* sign, float* agree) const {
   return true;
 }
 
+bool RemapStick(const float game_view[16], const float shown_view[16], float sx, float sy, float* ox, float* oy, float world_dir[2]) {
+  *ox = sx;
+  *oy = sy;
+  auto axes = [](const float* v, float r[2], float f[2]) {
+    r[0] = v[0], r[1] = v[8];
+    f[0] = v[2], f[1] = v[10];
+    const float lr = std::hypot(r[0], r[1]), lf = std::hypot(f[0], f[1]);
+    if (lr < 0.2f || lf < 0.2f) return false;
+    r[0] /= lr, r[1] /= lr, f[0] /= lf, f[1] /= lf;
+    return true;
+  };
+  float rg[2], fg[2], rv[2], fv[2];
+  if (!axes(game_view, rg, fg) || !axes(shown_view, rv, fv)) return false;
+  const float d[2] = {sx * rv[0] + sy * fv[0], sx * rv[1] + sy * fv[1]};
+  *ox = d[0] * rg[0] + d[1] * rg[1];
+  *oy = d[0] * fg[0] + d[1] * fg[1];
+  if (world_dir) {
+    const float l = std::hypot(d[0], d[1]);
+    world_dir[0] = l > 1e-4f ? d[0] / l : 0.0f;
+    world_dir[1] = l > 1e-4f ? d[1] / l : 0.0f;
+  }
+  return true;
+}
+
 bool TestCrossing(const Frame g[2], const float prev[3], const float now[3], bool standing_ok, const Rules& rules, Crossing* out) {
   for (int i = 0; i < 2; ++i) {
     const Frame& e = g[i];

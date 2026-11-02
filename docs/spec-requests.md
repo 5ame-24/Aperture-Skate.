@@ -62,7 +62,7 @@ Answers it: the first-person follower state (`skate3_native_scene*.cpp`, `Update
 walking: which state or flag the game's on-foot camera takes over, and whether a crossing or the Esc menu leaves the follower stale.
 Needed: a run with first person on foot, plus the `PCAM` "first person turned" lines and the first-person state at the moment it sticks.
 
-## R9. On-foot velocity and jump state  (open)
+## R9. On-foot velocity and jump state  (open; WALK probe built, PROGRESS 73)
 Needed by: FLING and AIR for walking/jumping crossings (PROGRESS 59: FLING is off while off the board, state 500).
 Answers it: which player state(s) and flags an on-foot jump uses (the `AIR off-board updates ... by state/flags` line gives a first answer
 at runtime), and where the walking character's velocity lives (actor field, character controller), so an exit velocity can be applied on foot.

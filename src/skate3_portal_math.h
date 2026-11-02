@@ -105,6 +105,13 @@ struct FacingLearner {
   static void Axis(const float R[9], int axis, float out[3]);  // axis 0..2 = column, 3..5 = row
 };
 
+// ---- First-person walking (FPVWALK): the stick relative to what you see ----
+// The game moves an on-foot skater relative to ITS camera; in portal first person you see another view. Re-express the stick (x right, y
+// forward) so the motion it asks for, read relative to the shown view, is the same motion relative to the game's camera. Both are
+// row-vector views (columns 0 / 2 = right / forward); only their horizontal parts count. world_dir (may be null) = the horizontal world
+// direction asked for (unit, or zero for no input). False (stick unchanged) when either view looks (nearly) straight up or down.
+bool RemapStick(const float game_view[16], const float shown_view[16], float sx, float sy, float* ox, float* oy, float world_dir[2]);
+
 // ---- Camera poses (portal camera carry) ----
 // A camera pose: world position and its axes. Row-vector view matrices (p_view = p_world * V, as the game and the native renderer
 // use) keep right/up/forward in columns 0/1/2 of the upper 3x3 and -pos . axis in row 3.
