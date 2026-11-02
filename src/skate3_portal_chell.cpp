@@ -4,6 +4,7 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <mutex>
 #include <string>
@@ -74,6 +75,13 @@ struct Slot {
   int64_t follow_lost_ns = 0;
 };
 Slot g_slot[kSlots];
+std::mutex g_status_mutex;
+std::string g_status[kSlots];
+void SetStatus(int s, std::string text) {
+  std::lock_guard<std::mutex> lock(g_status_mutex);
+  g_status[s] = std::move(text);
+}
+std::atomic<bool> g_picker{false};
 
 float Dist2(const float* a, const float* b) {
   const float d0 = a[0] - b[0], d1 = a[1] - b[1], d2 = a[2] - b[2];
@@ -95,6 +103,7 @@ int CoopCharacter(int k) {  // k = 0 or 1
 
 void Reset(Slot& st, const char* why, int s) {
   if (st.ready || !st.parts.empty()) REXLOG_INFO("portal-chell: CHAR slot {} reset ({})", s, why);
+  SetStatus(s, std::string("reset: ") + why);
   const int64_t keep_lost = st.follow_lost_ns;
   st = Slot{};
   st.follow_lost_ns = keep_lost;
@@ -168,6 +177,45 @@ void ToggleCoop() {
               portal_gun::GetCharacter(CoopCharacter(1)) ? "cache found" : "NO CACHE");
 }
 
+void SetSlotCharacter(int s, int c) {
+  const char* name = c >= 0 ? portal_gun::CharacterName(c) : "none";
+  if (c >= 0 && !portal_gun::GetCharacter(c)) {
+    REXLOG_INFO("portal-chell: CHAR slot {}: no cache for {} (tools/re/portalgun_extract.py --character all)", s, name);
+    return;
+  }
+  if (s == 0) {
+    if (c >= 0) rex::cvar::SetFlagByName("skate3_portal_character", name);
+    rex::cvar::SetFlagByName("skate3_portal_chell", c >= 0 ? "true" : "false");
+  } else if (s == 1 || s == 2) {
+    const int other = CoopCharacter(s == 1 ? 1 : 0);
+    const std::string mine = name, theirs = other >= 0 ? portal_gun::CharacterName(other) : "none";
+    const std::string list = s == 1 ? mine + "," + theirs : theirs + "," + mine;
+    rex::cvar::SetFlagByName("skate3_portal_coop_characters", list.c_str());
+    // co-op is on while either co-op slot has a character
+    rex::cvar::SetFlagByName("skate3_portal_coop", (c >= 0 || other >= 0) ? "true" : "false");
+  }
+  REXLOG_INFO("portal-chell: CHAR slot {} set to {} (panel)", s, name);
+}
+
+std::string SlotStatus(int s) {
+  if (s < 0 || s >= kSlots) return {};
+  const bool on = s == 0 ? REXCVAR_GET(skate3_portal_chell) : REXCVAR_GET(skate3_portal_coop);
+  const int c = SlotCharacter(s);
+  if (!on || c < 0) return "off";
+  if (!portal_gun::GetCharacter(c)) return std::string("no cache for ") + portal_gun::CharacterName(c);
+  std::lock_guard<std::mutex> lock(g_status_mutex);
+  return g_status[s].empty() ? std::string("waiting for its skater") : g_status[s];
+}
+
+bool PickerOpen() { return g_picker.load(); }
+void TogglePicker() {
+  static std::atomic<int64_t> last{0};
+  const int64_t now = NowNs();
+  if (now - last.load() < 400'000'000) return;
+  last = now;
+  g_picker = !g_picker.load();
+}
+
 std::atomic<bool> g_selector_probe{false};
 void RequestSelectorProbe() {
   g_selector_probe = true;
@@ -219,6 +267,11 @@ bool SlotTarget(int s, float out[3]) {
   const int pick = by[0].second;
   std::copy(chars[pick], chars[pick] + 3, st.follow);
   st.follow_have = true;
+  {
+    char line[120];
+    std::snprintf(line, sizeof(line), "found an NPC %.1f m from you, building", std::sqrt(by[0].first));
+    SetStatus(s, line);
+  }
   REXLOG_INFO("portal-chell: CHAR slot {} ({}) follows the NPC character at ({:.2f}, {:.2f}, {:.2f}), {:.1f} m from you", s,
               portal_gun::CharacterName(SlotCharacter(s)), st.follow[0], st.follow[1], st.follow[2], std::sqrt(by[0].first));
   std::copy(st.follow, st.follow + 3, out);
@@ -429,6 +482,12 @@ bool Build(int s, const std::vector<uint32_t>& parts) {
     }
     st.rig = rt::Retarget(bones, verts, all_infl, donor, 2);
     st.rigged = true;
+    {
+      char line[200];
+      std::snprintf(line, sizeof(line), "%s: own skeleton, %zu bones, %d mapped onto %d skater bones, gap %.3f -> %.3f m", who, bones.size(), st.rig.mapped,
+                    st.rig.distinct_keys, st.rig.gap_before, st.rig.gap_after);
+      SetStatus(s, line);
+    }
     const float ms = float(NowNs() - t0) * 1e-6f;
     REXLOG_INFO("portal-chell: CHAR slot {} ({}): own skeleton {} bones, {} mapped by their own vertices onto {} skater bones, {} bones turned to the "
                 "skater's rest pose (largest {:.0f} deg), gap to the skater {:.3f} -> {:.3f} m, built in {:.0f} ms", s, who, bones.size(), st.rig.mapped,
@@ -468,6 +527,7 @@ bool Build(int s, const std::vector<uint32_t>& parts) {
         ++counted;
       }
     }
+    SetStatus(s, std::string(who) + ": old cache without a skeleton (nearest-vertex weights)");
     REXLOG_INFO("portal-chell: CHAR slot {} ({}): no skeleton in the cache, weights transferred for {} vertices, mean distance to the donor vertex {:.3f} "
                 "(re-run portalgun_extract.py --character all for the own-skeleton path)", s, who, counted, counted ? total_gap / double(counted) : 0.0);
   }

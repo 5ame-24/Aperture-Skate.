@@ -11,6 +11,7 @@
 // place of that skater's own character items.
 
 #include <cstdint>
+#include <string>
 #include <vector>
 
 #include "skate3_portal_gunmodel.h"
@@ -28,6 +29,13 @@ void ToggleCoop();  // Ctrl+Shift+0: the two co-op slots on the nearest NPCs
 // Ctrl+Shift+9: one read-only scan of guest memory for the game's own character-select names (CHARSEL lines, spec request R11).
 void RequestSelectorProbe();
 bool TakeSelectorProbe();
+
+// Character slots panel (Ctrl+Shift+C, drawn by the portal overlay): slot s gets character c (portal_gun::Character, -1 = off). The same cvars
+// as Ctrl+0 / Ctrl+Shift+0, so the panel, the keys and the command line always agree.
+void SetSlotCharacter(int s, int c);
+std::string SlotStatus(int s);  // one line: off / no cache / waiting for its skater / built: bones, mapped, gap
+bool PickerOpen();
+void TogglePicker();
 
 // Render thread: where the slot's skater is this frame (you: the tracked point; co-op: the NPC character it follows). False = nobody (yet).
 bool SlotTarget(int s, float out[3]);

@@ -735,3 +735,9 @@ Actor offsets: +1200/+1216 ground pos, +1232 delta, +1248 velocity, +1296 flags,
     ray per Start/End batch (BlobRay, scratch below the cube's), round robin, the blob with the oldest answer, refreshed every 0.25 s and after
     a portal. Overlay: droppers (dark nozzle, coloured ring), blobs (dots). Logs `dropper placed`, `blob N went through the blue portal`, `blob
     paint #N` (every 50th, with the count lost after 5 s without a surface). Clear removes droppers and blobs.
+66. Character slots panel (built, untested; user: "slots for the portal characters"). Ctrl+Shift+C opens "Portal characters": one row per slot
+    (You, Co-op 1 = nearest NPC, Co-op 2 = next NPC), buttons Skater / Chell / Atlas / P-body (greyed when that cache is missing), and the
+    slot's status (off, waiting for its skater, found an NPC, "<name>: own skeleton N bones, M mapped onto K skater bones, gap a -> b m",
+    reset reasons). It sets the same cvars as Ctrl+0 / Ctrl+Shift+0 (skate3_portal_chell + skate3_portal_character, skate3_portal_coop +
+    skate3_portal_coop_characters with "none" for an empty co-op slot), so keys, panel and command line agree. The gun ignores clicks over the
+    panel. Log `CHAR slot s set to x (panel)`. The game's OWN character select (next to Shingo) still needs spec R11 (CHARSEL data).

@@ -700,6 +700,8 @@ void Skate3BaseApp::OnCreateDialogs(rex::ui::ImGuiDrawer* drawer) {
                         [] { skate3::portal_chell::Toggle(); });
   rex::ui::RegisterBind("bind_skate3_portal_coop", "Ctrl+Shift+0", "Portal characters: co-op on/off (the two nearest NPCs become Atlas and P-body)",
                         [] { skate3::portal_chell::ToggleCoop(); });
+  rex::ui::RegisterBind("bind_skate3_portal_slots", "Ctrl+Shift+C", "Portal characters: the character slots panel (you, co-op 1, co-op 2)",
+                        [] { skate3::portal_chell::TogglePicker(); });
   rex::ui::RegisterBind("bind_skate3_portal_charsel", "Ctrl+Shift+9", "Portal characters: scan for the game's character-select list (log only)",
                         [] { skate3::portal_chell::RequestSelectorProbe(); });
   rex::ui::RegisterBind("bind_skate3_portal_adopt", "Ctrl+9", "Portal gate: make the nearest game prop the companion cube (again: release it)",

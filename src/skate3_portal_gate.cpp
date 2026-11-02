@@ -1,5 +1,6 @@
 #include "skate3_portal_cube.h"
 #include "skate3_portal_gate.h"
+#include "skate3_portal_chell.h"
 #include "skate3_portal_gel.h"
 #include "skate3_portal_math.h"
 
@@ -1259,10 +1260,48 @@ bool Step(const float pos[3], bool allowed, unsigned flags, Cross* out) {
   return crossed;
 }
 
+// The character slots panel (Ctrl+Shift+C): one row per slot (you, co-op 1, co-op 2), a button per Portal 2 character, its status line.
+// A real window (the overlay itself is click-through); while the mouse is over it the gun does not fire.
+static bool g_picker_hovered = false;
+static void DrawCharacterPicker() {
+  g_picker_hovered = false;
+  if (!portal_chell::PickerOpen()) return;
+  ImGui::SetNextWindowPos(ImVec2(20.0f, 80.0f), ImGuiCond_FirstUseEver);
+  ImGui::SetNextWindowBgAlpha(0.85f);
+  if (ImGui::Begin("Portal characters", nullptr,
+                   ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoCollapse)) {
+    static const char* kSlotNames[portal_chell::kSlots] = {"You", "Co-op 1 (nearest NPC)", "Co-op 2 (next NPC)"};
+    static const char* kShown[portal_gun::kCharacters] = {"Chell", "Atlas", "P-body"};
+    for (int slot = 0; slot < portal_chell::kSlots; ++slot) {
+      ImGui::PushID(slot);
+      ImGui::TextUnformatted(kSlotNames[slot]);
+      const std::string status = portal_chell::SlotStatus(slot);
+      const bool off = status == "off";
+      const int cur = off ? -1 : portal_chell::SlotCharacter(slot);
+      for (int c = -1; c < portal_gun::kCharacters; ++c) {
+        if (c > -1) ImGui::SameLine();
+        const bool have = c < 0 || portal_gun::GetCharacter(c) != nullptr;
+        const bool selected = c == cur;
+        if (selected) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.15f, 0.45f, 0.85f, 1.0f));
+        if (!have) ImGui::BeginDisabled();
+        if (ImGui::Button(c < 0 ? "Skater" : kShown[c])) portal_chell::SetSlotCharacter(slot, c);
+        if (!have) ImGui::EndDisabled();
+        if (selected) ImGui::PopStyleColor();
+      }
+      ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "  %s", status.c_str());
+      ImGui::PopID();
+    }
+    ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "Ctrl+0 cycles yours, Ctrl+Shift+0 co-op on/off, Ctrl+Shift+C closes. Greyed = no cache yet.");
+    g_picker_hovered = ImGui::IsWindowHovered(ImGuiHoveredFlags_RootAndChildWindows) || ImGui::IsAnyItemHovered();
+  }
+  ImGui::End();
+}
+
 void Overlay::OnDraw(ImGuiIO& io) {
   if (!Enabled()) {
     return;
   }
+  DrawCharacterPicker();
   // Same pattern as the renderer indicator, the one overlay known to show in-game: a real window (here
   // full-screen, transparent, click-through) with a text widget, and the rings drawn into its draw list.
   ImGui::SetNextWindowPos(ImVec2(0.0f, 0.0f), ImGuiCond_Always);
@@ -1487,9 +1526,9 @@ void Overlay::OnDraw(ImGuiIO& io) {
     g_aim_y = 1.0f - (m.y - y0) / h * 2.0f;
     g_aim_free = true;
     if (REXCVAR_GET(skate3_portal_gate_mouse)) {
-      if ((mouse_in || fpv) && io.MouseClicked[0]) Request(0);
-      if ((mouse_in || fpv) && io.MouseClicked[1]) Request(1);
-      if ((mouse_in || fpv) && io.MouseClicked[2]) Request(2);
+      if ((mouse_in || fpv) && !g_picker_hovered && io.MouseClicked[0]) Request(0);
+      if ((mouse_in || fpv) && !g_picker_hovered && io.MouseClicked[1]) Request(1);
+      if ((mouse_in || fpv) && !g_picker_hovered && io.MouseClicked[2]) Request(2);
     }
     const float r = h * 0.022f;
     const ImU32 white = IM_COL32(255, 255, 255, 230);
