@@ -103,6 +103,7 @@ void Sfx(int kind);
 // The 3D Portal gun (skate3_portal_gunmodel): where the crosshair is (normalised device coordinates) and how hard the last shot kicked it (0..1).
 bool GunVisible();  // portal gate on and skate3_portal_gun_model
 void AimNdc(float* x, float* y);
+void NoteFizzle(int which);  // a shot placed nothing: the overlay fizzles at the reticle
 float GunKick(int* which);  // `which` = 0 blue, 1 orange
 // Ctrl+8: for 8 s the probe logs the game's world line tests near the skater (what a real grind looks like, to make the companion cube grindable).
 void RequestGrindCapture();

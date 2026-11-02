@@ -811,3 +811,11 @@ Actor offsets: +1200/+1216 ground pos, +1232 delta, +1248 velocity, +1296 flags,
     - CHARSEL: a list now needs text IDs >= 0x100 and 3 different names (ID 0x2F is a small number that matches by chance, so the 400255B0
       row is suspect); skate3_portal_charsel_dump="400255B0,..." dumps -256..+768 bytes around each address at the end of a scan, with the
       words that point at text annotated.
+72. Polish (built, untested):
+    - Portal size: one runtime size for the crossing oval, the hole, the drawn surfaces, the overlay, the rim probes and the overlap push
+      (portal_math::kHalfWidth/kHalfHeight are now set at run time; the gate uses them). skate3_portal_gate_shape "skate" (5.2 x 4.0 m,
+      default, as before) or "portal" (Portal's 1.63 x 2.74 m), skate3_portal_gate_size scale 0.5..2. Log `portal size now W x H m`.
+    - Opening: a new portal grows from its centre over skate3_portal_gate_open_time (0.25 s) with a small overshoot (ease-out-back), in the
+      renderer's surfaces (SurfaceShapes); the rim is thinner on small portals.
+    - Fizzle: a shot that placed nothing shows an expanding ring with sparks at the reticle in that portal's colour (0.35 s).
+    - skate3_portal_gate_fit_strict (off): Portal's rule, a portal that cannot fit is removed (fizzles) instead of kept.

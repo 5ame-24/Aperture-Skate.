@@ -7,8 +7,14 @@
 namespace skate3::portal_math {
 
 constexpr float kFlatNy = 0.7f;      // |n.y| above this behaves as a floor/ceiling portal
-constexpr float kHalfWidth = 2.6f;   // oval half extents, metres
-constexpr float kHalfHeight = 2.0f;
+// Oval half extents, metres. Set at run time by the gate (skate3_portal_gate_shape / _size, SetPortalSize); the defaults are the "skate"
+// shape (5.2 x 4.0 m, easy to ride through), Portal's own is 1.63 x 2.74 m. Written by the game thread only, when the cvars change.
+inline float kHalfWidth = 2.6f;
+inline float kHalfHeight = 2.0f;
+inline void SetPortalSize(float hw, float hh) {
+  kHalfWidth = hw;
+  kHalfHeight = hh;
+}
 
 // Right-handed frame: r x u = n. n = front normal (the open side), u = "up" in the plane (world up on a wall, the shooter's
 // heading on a floor or ceiling), r = across. `trigger` = metres in front of the plane where a crossing fires.

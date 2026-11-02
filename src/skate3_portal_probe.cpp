@@ -487,6 +487,7 @@ void WriteBeFloats(uint8_t* base, uint32_t addr, const float* v, int n) {
 void GunFallback(const float skater[3]) {
   if (g_ray.free_aim) {
     REXLOG_INFO("portal-probe: GUN no wall under the reticle, no portal");
+    skate3::portal_gate::NoteFizzle(g_ray.which);
   } else {
     skate3::portal_gate::PlaceAhead(g_ray.which, skater);
   }
