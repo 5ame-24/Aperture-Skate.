@@ -52,7 +52,7 @@ REXCVAR_DEFINE_DOUBLE(skate3_portal_gate_wall_exit, 0.0, "Skate 3",
 
 REXCVAR_DEFINE_BOOL(skate3_portal_gate_fit, true, "Skate 3",
                     "Portal fitting, as in Portal: a new portal is pushed clear of the other one on the same surface, then nudged (up to "
-                    "4 rounds of 8 rim probe rays, 2 m at most) until its whole oval sits on the surface it was shot at. Log prefix PORTALFIT.")
+                    "6 rounds of 8 rim probe rays, growing steps, 2 m at most) until its whole oval sits on the surface it was shot at. Log prefix PORTALFIT.")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
 REXCVAR_DEFINE_BOOL(skate3_portal_gate_hole, true, "Skate 3",
@@ -1201,6 +1201,22 @@ void FitResult(int which, uint32_t gen, const bool hit[], const float pos[][3], 
     bad += !ok[k];
     pattern[k] = ok[k] ? 'o' : (hit[k] ? 'x' : '-');  // o on the surface, x hit something else, - nothing within reach
   }
+  // why each failed rim point failed (run 209: 6 "best effort" and 2 "does not fit" with no detail)
+  std::string why;
+  static const char* kSide[portal_math::kRimProbes] = {"right", "upper right", "top", "upper left", "left", "lower left", "bottom", "lower right"};
+  for (int k = 0; k < portal_math::kRimProbes; ++k) {
+    if (ok[k]) continue;
+    char b[96];
+    if (!hit[k]) {
+      std::snprintf(b, sizeof(b), "%s%s: nothing within %.1f m", why.empty() ? "" : "; ", kSide[k], rules.probe_len);
+    } else {
+      const float rel[3] = {pos[k][0] - g.c[0], pos[k][1] - g.c[1], pos[k][2] - g.c[2]};
+      std::snprintf(b, sizeof(b), "%s%s: hit %.2f m %s the plane, facing %.2f", why.empty() ? "" : "; ", kSide[k], std::abs(Dot3(rel, g.n)),
+                    Dot3(rel, g.n) > 0 ? "in front of" : "behind", Dot3(nrm[k], g.n));
+    }
+    why += b;
+  }
+  const char* surface = g.Flat() ? (g.n[1] > 0 ? "floor" : "ceiling") : "wall";
   float sh[2];
   const int st = portal_math::FitShift(ok, rules, sh);
   const char* name = which ? "orange" : "blue";
@@ -1209,18 +1225,22 @@ void FitResult(int which, uint32_t gen, const bool hit[], const float pos[][3], 
     f.want = false;
     return;
   }
-  if (st == 2 || f.round + 1 >= 4 || f.moved + rules.step > rules.max_total + 1e-3f) {
-    REXLOG_INFO("portal-gate: PORTALFIT {} {}: {} of {} rim points off the surface [{}] (kept where it is, moved {:.2f} m)", name,
-                st == 2 ? "does not fit (the surface is smaller than the portal)" : "best effort", bad, portal_math::kRimProbes, pattern, f.moved);
+  // steps grow each round (0.35, 0.49, 0.63, ... m): a portal shot low on a wall needs more than 1 m (run 209 "best effort" with 1 point off)
+  const float grow = 1.0f + 0.4f * float(f.round);
+  if (st == 2 || f.round + 1 >= 6 || f.moved + rules.step * grow > rules.max_total + 1e-3f) {
+    REXLOG_INFO("portal-gate: PORTALFIT {} {}: {} of {} rim points off the {} [{}] (kept where it is, moved {:.2f} m) - {} (portal {:.1f} x {:.1f} m)", name,
+                st == 2 ? "does not fit (the surface is smaller than the portal)" : "best effort", bad, portal_math::kRimProbes, surface, pattern, f.moved,
+                why, 2 * kHalfWidth, 2 * kHalfHeight);
     f.want = false;
     return;
   }
-  for (int k = 0; k < 3; ++k) g.c[k] += sh[0] * g.r[k] + sh[1] * g.u[k];
-  f.moved += rules.step;
+  for (int k = 0; k < 3; ++k) g.c[k] += (sh[0] * g.r[k] + sh[1] * g.u[k]) * grow;
+  f.moved += rules.step * grow;
   ++f.round;
   f.sent = false;  // probe again from the new place
   g_have_prev = false;
-  REXLOG_INFO("portal-gate: PORTALFIT {} round {}: [{}] {} off, nudged ({:+.2f} across, {:+.2f} up)", name, f.round, pattern, bad, sh[0], sh[1]);
+  REXLOG_INFO("portal-gate: PORTALFIT {} round {}: [{}] {} off ({}), nudged ({:+.2f} across, {:+.2f} up)", name, f.round, pattern, bad, why, sh[0] * grow,
+              sh[1] * grow);
 }
 
 void PlaceAhead(int which, const float skater[3]) {
@@ -1328,6 +1348,9 @@ bool Step(const float pos[3], bool allowed, unsigned flags, Cross* out) {
       out->lift = (hole || to.n[1] < -0.5f) ? 0.0f : 1.0f;  // a ceiling exit starts at head height, not lifted
       std::copy(to.c, to.c + 3, out->exit_c);
       std::copy(to.n, to.n + 3, out->exit_n);
+      std::copy(g.n, g.n + 3, out->entry_n);
+      out->exit_lat = -lat;
+      out->exit_vert = vert;
       crossed = true;
       Sfx(2);
       REXLOG_INFO("portal-gate: crossed {} portal at ({:.2f}, {:.2f}, {:.2f}) -> ({:.2f}, {:.2f}, {:.2f}){}",

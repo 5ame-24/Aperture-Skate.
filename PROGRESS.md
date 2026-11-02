@@ -795,3 +795,19 @@ Actor offsets: +1200/+1216 ground pos, +1232 delta, +1248 velocity, +1296 flags,
       (nearly) vertical (floor -> wall) the velocity heading is used; when the velocity is vertical too, the last heading turned through
       the pair. Logs `FACING learned: forward = entity matrix row/column k (+/-), agreement A`, `GATE exit facing from your facing (axis k): in
       (...) -> out (...); velocity heading out (...)`, `exit heading from your last heading`.
+71. Run 209 (HANDOFF 14): angles good (FACING agreement 0.93), rolling crossings kept 73% (was ~45%), airborne 53% (n 4), fitting works
+    (13 fits after nudging, 6 best effort, 2 does not fit), CHARSEL found a list row "Shingo" (ID 0x2F) at 400255B0. Human: "wall/floor
+    seems a little off". Built now (untested):
+    - CROSSCHECK per crossing: `CROSSCHECK #n [f N] wall->floor rolling: in (...) -> out (...), facing (...), came out X across / Y up from
+      the exit centre`, then at +10 and +20 updates: speed kept, heading off the expected exit direction, off the facing given, vertical vs
+      expected (v_out.y - g t), state, flags. crossings.py summarises by pair kind (wall->wall, floor->wall, wall->floor, ...).
+    - FACING: the axis is LOCKED once learned with agreement >= 0.9 (run 209: logged "row 0" but crossings used "axis 1": Best() drifted
+      while it kept learning; only 6 of 93 crossings used the facing). Each crossing that does not use it says why (`exit facing from the
+      velocity: <reason> (axis, agreement, samples)`).
+    - PORTALFIT: each failed rim point is named (right, upper right, top, ... bottom) with why (nothing within 1 m / hit X m in front of or
+      behind the plane, facing D); the surface and the portal size are in the final line. Steps grow (0.35 x (1 + 0.4 round)), 6 rounds,
+      2 m at most. Note: our portal is 5.2 x 4.0 m (Portal's 1.6 x 2.7 m), so "does not fit" on most walls lower than 4 m is expected
+      (local task T7 is the size cvar).
+    - CHARSEL: a list now needs text IDs >= 0x100 and 3 different names (ID 0x2F is a small number that matches by chance, so the 400255B0
+      row is suspect); skate3_portal_charsel_dump="400255B0,..." dumps -256..+768 bytes around each address at the end of a scan, with the
+      words that point at text annotated.

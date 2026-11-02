@@ -71,6 +71,8 @@ struct Cross {
   float lift;         // metres to raise the feet above the exit point (0 for a ceiling exit)
   float exit_c[3];    // the exit portal's centre and front normal (keeps the feet out of a floor and the head out of a ceiling)
   float exit_n[3];
+  float entry_n[3];   // the entry portal's front normal (CROSSCHECK: which kind of pair)
+  float exit_lat, exit_vert;  // where in the exit oval it came out (across, up; metres from the centre)
 };
 // Game thread, once per frame for the human skater. `pos` is the skater's position. Returns true when `pos`
 // crossed a portal while `allowed` (else the crossing is logged and ignored; `flags` is only for that log).
