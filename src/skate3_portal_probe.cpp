@@ -859,8 +859,8 @@ bool g_onboard_teleport_only = false;
 // A fling exit waiting for its teleport to end, then the mode's move (skate3_portal_fling_mode), then one result line 1.2 s later.
 struct FlingExit {
   bool pending = false, watching = false;
-  int mode = 0, seq = 0;
-  float y0 = 0, peak = 0, vout_y = 0, gravity = 9.81f;
+  int mode = 0, seq = 0, frames = 0;
+  float y0 = 0, peak = 0, vout_y = 0, gravity = 9.81f, vy_max = -1e9f, fall_in = 0;
   int64_t t0 = 0;
 } g_fexit;
 int g_fexit_seq = 0;
@@ -1030,11 +1030,12 @@ struct Fling {
   int topped = 0;
   float gravity = 9.81f;  // the AIR probe's measured value once 3+ clean arcs agree, else assumed
   bool on_foot = false;   // off the board: only the actor's world velocity is held
+  float fall_in = 0.0f;   // the entry's falling speed (for the result line)
   int ok_run = 0;         // updates in a row on target; the hold ends once it has stuck (4 in a row, after at least 6 updates)
 };
 // The hold has converged: the game keeps the exit velocity by itself now.
-bool FlingConverged(Fling& f, bool on_target) {
-  f.ok_run = on_target ? f.ok_run + 1 : 0;
+bool FlingConverged(Fling& f, bool on_target, bool airborne = true) {
+  f.ok_run = on_target && airborne ? f.ok_run + 1 : 0;  // on target while still riding is not "it stuck": riding rewrites it next frame
   if (f.ok_run >= 4 && f.k >= 6) {
     f.left = 0;
     return true;
@@ -1047,6 +1048,9 @@ std::atomic<uint32_t> g_human_entity{0};  // the human's presentation entity (ne
 void FlingFrame(uint8_t* base, uint32_t self) {
   Fling& f = g_fling;
   if (f.left <= 0) return;
+  // Run 213: the hold started at the crossing, so its frames (and a false "converged": the restored rates equal v_out for a moment) were used
+  // up during the teleport; riding then wiped the speed. A fling exit's hold waits for the teleport to end (and the mode's move).
+  if (g_fexit.pending) return;
   --f.left;
   ++f.k;
   if (f.on_foot) {
@@ -1126,7 +1130,10 @@ void FlingFrame(uint8_t* base, uint32_t self) {
     f.left = 0;
     return;
   }
-  if (FlingConverged(f, along >= 0.9f * e_along)) return;
+  uint32_t fl_now = 0;
+  ReadBe32(base, self + 1296, &fl_now);
+  const bool airborne_now = (fl_now & 0x80000000u) && !(fl_now & 0x40000000u);
+  if (FlingConverged(f, along >= 0.9f * e_along, airborne_now)) return;
   if (along < 0.9f * e_along) {
     const float add = e_along - along;
     for (int i = 0; i < 7; ++i) {
@@ -2768,6 +2775,7 @@ bool GateStep(PPCContext& ctx, uint8_t* base, uint32_t self) {
       }
       g_fling.t0 = std::chrono::steady_clock::now().time_since_epoch().count();
       g_fling.on_foot = state_at_cross == 500;
+      g_fling.fall_in = std::max(0.0f, -v_entry[1]);
       const bool measured = g_air_gravity_n.load() >= 3;
       if (measured) g_fling.gravity = g_air_gravity.load();
       REXLOG_INFO("portal-probe: FLING [f {}] armed: v_in ({:.1f}, {:.1f}, {:.1f}) -> v_out ({:.1f}, {:.1f}, {:.1f}) {:.1f} m/s for {} frames, gravity {:.2f} ({})", g_gate_frame,
@@ -3391,26 +3399,44 @@ extern "C" REX_FUNC(sub_82DB88C8) {
         if (ReadBe32(base, self + 1296, &fl)) WriteBe32(base, self + 1296, (fl & 0x0FFFFFFFu) | 0x90000000u);
         if (ReadBe32(base, self + 1884, &skel) && ReadBe32(base, skel + kOnBoardByte, &w)) WriteBe32(base, skel + kOnBoardByte, w & ~0x01000000u);
       }
-      float ent[3];
-      const uint32_t he = g_human_entity;
-      g_fexit.watching = he && skate3::native_entity::CharacterWorldPos(base, he, ent);
-      g_fexit.y0 = g_fexit.peak = g_fexit.watching ? ent[1] : 0.0f;
-      g_fexit.t0 = std::chrono::steady_clock::now().time_since_epoch().count();
+      // the hold starts now, in the air (or on its way there)
+      g_fling.t0 = std::chrono::steady_clock::now().time_since_epoch().count();
+      g_fling.k = 0;
+      g_fling.ok_run = 0;
+      g_fling.left = std::clamp(int(REXCVAR_GET(skate3_portal_fling_frames)), 6, 120);
+      g_fexit.watching = true;
+      g_fexit.frames = 0;
+      g_fexit.vy_max = -1e9f;
+      g_fexit.t0 = g_fling.t0;
     }
   }
   if (self == g_human && g_fexit.watching) {
+    // Height from the 3rd update after the teleport (run 213: the presentation entity lags the teleport by a frame or two, so "rose 15 m"
+    // was the jump from the entry up to the exit portal, not a fling), and the highest upward speed the board / actor really had.
     float ent[3];
     const uint32_t he = g_human_entity;
-    if (he && skate3::native_entity::CharacterWorldPos(base, he, ent)) g_fexit.peak = std::max(g_fexit.peak, ent[1]);
+    const bool have_y = he && skate3::native_entity::CharacterWorldPos(base, he, ent);
+    ++g_fexit.frames;
+    if (g_fexit.frames == 3 && have_y) g_fexit.y0 = g_fexit.peak = ent[1];
+    if (g_fexit.frames > 3 && have_y) g_fexit.peak = std::max(g_fexit.peak, ent[1]);
+    {
+      float v[3] = {0, 0, 0};
+      uint32_t bd = 0, bk = 0;
+      if (ReadBe32(base, self + 1880, &bd) && ReadBe32(base, bd + 12, &bk) && bk >= 0x10000 && ReadVec(base, bk + kLinRates, v)) {
+        g_fexit.vy_max = std::max(g_fexit.vy_max, v[1]);
+      }
+    }
     const float t = float(std::chrono::steady_clock::now().time_since_epoch().count() - g_fexit.t0) * 1e-9f;
-    if (t > 1.2f) {
+    if (t > 1.5f) {
       g_fexit.watching = false;
       const float g = g_fexit.gravity, vy = g_fexit.vout_y;
-      const float free_rise = vy > 0 ? vy * vy / (2.0f * g) : 0.0f;
+      // Portal's rule (spec 001): the exit keeps the entry speed along the exit, no clamp: a floor-floor drop of h comes back up h
+      const float portal_rise = vy > 0 ? vy * vy / (2.0f * g) : 0.0f;
       const float rose = g_fexit.peak - g_fexit.y0;
-      REXLOG_INFO("portal-probe: FLING #{} [{}]: rose {:.2f} m (a free flight at {:.1f} m/s up would rise {:.2f} m) - {}", g_fexit.seq,
-                  skate3::portal_gate::FlingModeName(g_fexit.mode), rose, vy, free_rise,
-                  free_rise < 0.5f ? "not an upward fling" : rose > 0.5f * free_rise ? "FLEW" : rose > 0.15f * free_rise ? "partly" : "NOT FLYING");
+      REXLOG_INFO("portal-probe: FLING #{} [{}]: fell in at {:.1f} m/s, out at {:.1f} m/s up; Portal rule: rise {:.1f} m; rose {:.2f} m, top upward speed "
+                  "{:.1f} m/s - {}", g_fexit.seq, skate3::portal_gate::FlingModeName(g_fexit.mode), g_fexit.fall_in, vy, portal_rise, rose,
+                  g_fexit.vy_max, portal_rise < 0.5f ? "not an upward fling" : rose > 0.5f * portal_rise ? "FLEW" : rose > 0.15f * portal_rise ? "partly"
+                                                                                                                      : "NOT FLYING");
     }
   }
   if (self == g_human && g_onboard_frames > 0) ForceOnBoard(base, self, "before the frame");
@@ -3433,6 +3459,7 @@ extern "C" REX_FUNC(sub_82DB88C8) {
       g_fexit.mode = skate3::portal_gate::FlingMode();
       g_fexit.seq = ++g_fexit_seq;
       g_fexit.vout_y = g_fling.vout[1];
+      g_fexit.fall_in = g_fling.fall_in;
       g_fexit.gravity = g_fling.gravity;
     }
     g_recover_window = 300;

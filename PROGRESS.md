@@ -883,3 +883,13 @@ Actor offsets: +1200/+1216 ground pos, +1232 delta, +1248 velocity, +1296 flags,
     - release: only the on-board byte is released after the teleport (HANDOFF 20).
     One line per fling: `FLING #n [mode]: rose X m (a free flight at V m/s up would rise Y m) - FLEW | partly | NOT FLYING`. Removed: the
     per-frame FLING / FLINGTRACE lines and the per-crossing entry-velocity line (kept only when a store is rejected).
+78. Run 213 (fling modes "all basically the same", rises 14-17 m every mode): the measurement was wrong and the hold ran at the wrong time.
+    - The ~15 m "rise" was the jump from the entry portal up to the exit (the presentation entity lags the teleport a frame or two, and the
+      rise was measured from the entity at the teleport's end). Now measured from the 3rd update after the teleport, plus the highest
+      upward board speed actually reached. The 24-60 m/s launches are real: a floor-floor pair loops you (Portal's infinite fall) and each
+      pass keeps the speed.
+    - The hold (FLING) started at the crossing: its frames, and a false "converged" (the restored rates equal v_out for a moment), were
+      used up during the teleport, then riding wiped the speed before the mode's move. Now a fling exit's hold waits for the teleport to
+      end, restarts its clock at the mode's move (ollie / air / lift / release), and "converged" only counts AIRBORNE frames.
+    - One line per fling: `FLING #n [mode]: fell in at A m/s, out at B m/s up; Portal rule: rise R m; rose X m, top upward speed V m/s -
+      FLEW | partly | NOT FLYING` (Portal rule, spec 001: the exit keeps the entry speed along its normal, no clamp: rise = B^2 / 2g).
