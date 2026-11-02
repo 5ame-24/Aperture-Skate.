@@ -741,3 +741,19 @@ Actor offsets: +1200/+1216 ground pos, +1232 delta, +1248 velocity, +1296 flags,
     reset reasons). It sets the same cvars as Ctrl+0 / Ctrl+Shift+0 (skate3_portal_chell + skate3_portal_character, skate3_portal_coop +
     skate3_portal_coop_characters with "none" for an empty co-op slot), so keys, panel and command line agree. The gun ignores clicks over the
     panel. Log `CHAR slot s set to x (panel)`. The game's OWN character select (next to Shingo) still needs spec R11 (CHARSEL data).
+67. Run 198-200 feedback -> fixes (built, untested).
+    - Panel "semi freeze" (Ctrl+Shift+C, then Chell picked): not the panel. Picking Chell started her first build, which never finished in
+      a minute (no "own skeleton" line): the retarget's pose search asked a nearest-point grid ~150k times a bone, and samples far from the
+      free skater points walked most of the grid. Now a per-bone distance field (4 cm cells, capped 0.4 m, chamfer sweeps; O(1) lookups) and
+      a 4 s budget (Result.budget_hit). Benchmark (scratch, 77 bones, 11.6k vertices, 15k skater vertices, A-pose vs T-pose): over 120 s
+      before, 176 ms now, both arms turned, gap 0.088 -> 0.016 m. And builds run on their own thread (portal_chell: g_pending, picked up
+      in Ready(); the captured clouds are copied under the lock, then released; a failed build waits 1 s before retrying), so the skater
+      shows until the character is ready ("building (...)" in the panel's status).
+    - Dropper: Ctrl+Shift+H produced no line at all (the bind never reached the game; Ctrl+Shift+C/9 did). Ctrl+H now cycles portals ->
+      paint -> DROPPER -> portals (and D-pad down + B); the Ctrl+Shift+H bind still works if it arrives and logs `GEL key Ctrl+Shift+H
+      received`. First 6 blob rays are logged (`GEL blob N ray: hit at ... / no hit`).
+    - CHARSEL: the per-place lines come before the pointer pass (`place i at ADDR (ASCII|UTF-16BE): [text]` or `read failed`); the pointer
+      pass is one hash lookup per word with progress lines (25/50/75/100%), and an unreadable pointer neighbourhood is logged. Run 200 found
+      "Shingo" in 24 places and the second (pointer) pass was cut short by quitting.
+    - Freecam ENGAGED: not the new keys. The portal first person runs on the freecam path, so every first-person start (Ctrl+4, D-pad down
+      + R3) logs it; the line now says which (`ENGAGED (portal first person: ...)` or `(drone camera: End key ...)`).

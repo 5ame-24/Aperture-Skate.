@@ -45,6 +45,7 @@ struct Result {
   float max_turn_deg = 0;          // largest single turn (last pass)
   float gap_before = 0, gap_after = 0;  // mean distance character vertex -> nearest skater vertex, before and after the pose correction
   int distinct_keys = 0;           // how many different skater bones the character uses
+  bool budget_hit = false;         // the pose search stopped at its 4 s budget (the rest of the bones stayed as authored)
 };
 
 // verts: 3 floats per vertex; infl: one per vertex. passes: 1..3 (2 recommended).

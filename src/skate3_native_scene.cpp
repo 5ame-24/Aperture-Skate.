@@ -6224,9 +6224,11 @@ bool UpdateFreecam(FrameScene& scene, const float cam_view[16], double now) {
 #endif
     fc.engaged = true;
     REXLOG_INFO(
-        "native-scene freecam: ENGAGED at ({:.1f}, {:.1f}, {:.1f}); WASD fly, "
+        "native-scene freecam: ENGAGED ({}) at ({:.1f}, {:.1f}, {:.1f}); WASD fly, "
         "E/Space up, Q/C down, arrows/right-drag look, Z/X zoom, Shift fast, "
         "Ctrl slow",
+        REXCVAR_GET(skate3_native_render_scene_freecam) ? "drone camera: End key or skate3_native_render_scene_freecam"
+                                                         : "portal first person: Ctrl+4 or D-pad down + R3",
         fc.pos[0], fc.pos[1], fc.pos[2]);
   }
   const double dt = std::clamp(now - fc.last_t, 0.0, 0.1);

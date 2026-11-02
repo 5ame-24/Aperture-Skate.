@@ -51,6 +51,7 @@ int g_n = 0;
 uint32_t g_next_id = 1;
 std::atomic<int> g_count{0};
 std::atomic<bool> g_mode{false};
+std::atomic<bool> g_dropper_mode{false};  // gel mode's gun sub-mode: droppers instead of paint
 pm::GelRules g_rules;
 
 int64_t NowNs() { return std::chrono::steady_clock::now().time_since_epoch().count(); }
@@ -95,10 +96,20 @@ void ToggleMode() {
   const int64_t now = NowNs();
   if (now - last.load() < 400'000'000) return;  // the bind auto-repeats while held
   last = now;
-  const bool on = !g_mode.load();
-  g_mode = on;
-  REXLOG_INFO("portal-gel: GEL mode {} ({} patches painted)", on ? "ON: the gun paints gel (blue bounce, orange speed)" : "off: the gun places portals",
-              Count());
+  // Ctrl+H (and D-pad down + B) cycles: portals -> paint -> dropper -> portals. Run 199: Ctrl+Shift+H never reached the game (no line at
+  // all), so the dropper is on the key that works too.
+  if (!g_mode.load()) {
+    g_mode = true;
+    g_dropper_mode = false;
+    REXLOG_INFO("portal-gel: GEL mode ON: the gun paints gel (blue bounce, orange speed); Ctrl+H again for droppers ({} patches painted)", Count());
+  } else if (!g_dropper_mode.load()) {
+    g_dropper_mode = true;
+    REXLOG_INFO("portal-gel: GEL gun sub-mode: DROPPER (a shot places a gel dropper); Ctrl+H again for portals");
+  } else {
+    g_mode = false;
+    g_dropper_mode = false;
+    REXLOG_INFO("portal-gel: GEL mode off: the gun places portals ({} patches painted)", Count());
+  }
 }
 
 void PaintImpl(int kind, const float hit[3], const float normal[3], uint32_t frame, bool quiet) {
@@ -296,7 +307,6 @@ std::mutex g_stream_mutex;
 std::vector<Dropper> g_droppers;
 std::vector<Blob> g_blobs;
 uint32_t g_next_blob = 1;
-std::atomic<bool> g_dropper_mode{false};
 int g_blob_paints = 0, g_blob_hops = 0, g_blob_lost = 0;
 }  // namespace
 
@@ -432,6 +442,11 @@ bool NextBlobRay(uint32_t* blob, float o[3], float d[3], float* len) {
 }
 
 void OnBlobRay(uint32_t blob, bool hit, const float pos[3], const float normal[3]) {
+  static std::atomic<int> logged{0};
+  if (logged.fetch_add(1) < 6) {
+    REXLOG_INFO("portal-gel: GEL blob {} ray: {} ({:.2f}, {:.2f}, {:.2f}) normal ({:.2f}, {:.2f}, {:.2f})", blob, hit ? "hit at" : "no hit", pos[0], pos[1],
+                pos[2], normal[0], normal[1], normal[2]);
+  }
   std::lock_guard<std::mutex> lock(g_stream_mutex);
   for (Blob& b : g_blobs) {
     if (b.id != blob) continue;

@@ -1541,32 +1541,78 @@ void CharselScan(uint8_t* base, std::string names) {
     });
     REXLOG_INFO("portal-probe: CHARSEL \"{}\": {} places in guest memory{}", name, hits.size(), hits.size() >= 24 ? " (first 24)" : "");
     if (hits.size() > 8) hits.resize(8);
-    // one pass for the pointers to every hit (and to the 2 or 4 bytes before it: a length or flag before the text)
+    // each place first, before the slow pointer pass (run 200: the scan was stopped before any per-place line)
+    std::vector<std::string> arounds(hits.size());
+    for (size_t hi = 0; hi < hits.size(); ++hi) {
+      const uint32_t h = hits[hi].first;
+      uint8_t ctx[64];
+      std::string& around = arounds[hi];
+      if (skate3::native_scene::GuestTryCopy(ctx, base + h - 16, sizeof(ctx))) {
+        for (uint8_t c : ctx) around.push_back(c >= 0x20 && c <= 0x7E ? char(c) : '.');
+      } else {
+        around = "read failed";
+      }
+      REXLOG_INFO("portal-probe: CHARSEL \"{}\" place {} at {:08X} ({}): [{}]", name, hi, h, hits[hi].second ? "UTF-16BE" : "ASCII", around);
+    }
+    // one pass for the pointers to every place (and to the 2 or 4 bytes before it: a length or flag before the text); a small hash set of the
+    // targets keeps it to one lookup per word
+    std::vector<uint32_t> targets;
+    for (const auto& hp : hits)
+      for (uint32_t back : {0u, 2u, 4u}) targets.push_back(hp.first - back);
+    constexpr uint32_t kSet = 256;  // power of two, > 3 x 8 targets
+    uint32_t set[kSet];
+    bool used[kSet] = {};
+    for (uint32_t t : targets) {
+      uint32_t i = (t * 2654435761u) & (kSet - 1);
+      while (used[i] && set[i] != t) i = (i + 1) & (kSet - 1);
+      used[i] = true, set[i] = t;
+    }
     std::vector<std::vector<uint32_t>> all_refs(hits.size());
-    for_chunks([&](uint32_t a, const uint8_t* d) {
-      for (uint32_t i = 0; i + 4 <= kChunk; i += 4) {
-        const uint32_t w = (uint32_t(d[i]) << 24) | (uint32_t(d[i + 1]) << 16) | (uint32_t(d[i + 2]) << 8) | d[i + 3];
-        for (size_t hi = 0; hi < hits.size(); ++hi) {
-          const uint32_t h = hits[hi].first;
-          if ((w == h || w == h - 2 || w == h - 4) && all_refs[hi].size() < 12) all_refs[hi].push_back(a + i);
+    uint64_t scanned = 0, total = 0;
+    for (const Range& r : kRanges) total += uint64_t(r.hi) - r.lo;
+    int next_report = 25;
+    for (const Range& rg : kRanges) {
+      for (uint64_t a = rg.lo; a < rg.hi; a += kChunk) {
+        scanned += kChunk;
+        if (scanned * 100 >= uint64_t(next_report) * total) {
+          REXLOG_INFO("portal-probe: CHARSEL \"{}\" pointer pass {}%", name, next_report);
+          next_report += 25;
+        }
+        if (!skate3::native_scene::GuestTryCopy(buf.data(), base + a, kChunk)) continue;
+        const uint8_t* d = buf.data();
+        for (uint32_t i = 0; i + 4 <= kChunk; i += 4) {
+          const uint32_t w = (uint32_t(d[i]) << 24) | (uint32_t(d[i + 1]) << 16) | (uint32_t(d[i + 2]) << 8) | d[i + 3];
+          uint32_t k = (w * 2654435761u) & (kSet - 1);
+          bool found = false;
+          while (used[k]) {
+            if (set[k] == w) {
+              found = true;
+              break;
+            }
+            k = (k + 1) & (kSet - 1);
+          }
+          if (!found) continue;
+          for (size_t hi = 0; hi < hits.size(); ++hi) {
+            const uint32_t h = hits[hi].first;
+            if ((w == h || w == h - 2 || w == h - 4) && all_refs[hi].size() < 12) all_refs[hi].push_back(uint32_t(a) + i);
+          }
         }
       }
-    });
+    }
     for (size_t hi = 0; hi < hits.size(); ++hi) {
       const uint32_t h = hits[hi].first;
       const bool utf16 = hits[hi].second;
       const std::vector<uint32_t>& refs = all_refs[hi];
-      uint8_t ctx[64];
-      std::string around;
-      if (skate3::native_scene::GuestTryCopy(ctx, base + h - 16, sizeof(ctx))) {
-        for (uint8_t c : ctx) around.push_back(c >= 0x20 && c <= 0x7E ? char(c) : '.');
-      }
+      const std::string& around = arounds[hi];
       REXLOG_INFO("portal-probe: CHARSEL \"{}\" at {:08X} ({}): [{}], {} pointers to it", name, h, utf16 ? "UTF-16BE" : "ASCII", around, refs.size());
       for (size_t ri = 0; ri < refs.size() && ri < 6; ++ri) {
         const uint32_t ref = refs[ri];
         uint32_t words[32] = {};
         uint8_t raw[128];
-        if (!skate3::native_scene::GuestTryCopy(raw, base + ref - 64, sizeof(raw))) continue;
+        if (!skate3::native_scene::GuestTryCopy(raw, base + ref - 64, sizeof(raw))) {
+          REXLOG_INFO("portal-probe: CHARSEL   pointer at {:08X}: read failed around it", ref);
+          continue;
+        }
         std::string line;
         for (int k = 0; k < 32; ++k) {
           words[k] = (uint32_t(raw[4 * k]) << 24) | (uint32_t(raw[4 * k + 1]) << 16) | (uint32_t(raw[4 * k + 2]) << 8) | raw[4 * k + 3];

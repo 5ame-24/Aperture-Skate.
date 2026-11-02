@@ -6,7 +6,9 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <memory>
 #include <mutex>
+#include <thread>
 #include <string>
 #include <unordered_map>
 
@@ -75,6 +77,12 @@ struct Slot {
   int64_t follow_lost_ns = 0;
 };
 Slot g_slot[kSlots];
+// Builds run on their own thread (run 199: Chell's first build stalled the render thread for over a minute); the result waits here until the
+// render thread picks it up in Ready().
+std::mutex g_pending_mutex;
+std::unique_ptr<Slot> g_pending[kSlots];
+std::atomic<bool> g_building[kSlots] = {};
+std::atomic<int64_t> g_build_failed_ns[kSlots] = {};
 std::mutex g_status_mutex;
 std::string g_status[kSlots];
 void SetStatus(int s, std::string text) {
@@ -310,6 +318,21 @@ bool Captured(uint32_t mesh) {
 bool Ready(int s) {
   if (s < 0 || s >= kSlots) return false;
   Sync(s);
+  std::unique_ptr<Slot> done;
+  {
+    std::lock_guard<std::mutex> lock(g_pending_mutex);
+    done = std::move(g_pending[s]);
+  }
+  if (done) {
+    const int want = SlotActive(s) ? SlotCharacter(s) : -1;
+    if (done->built_char == want) {
+      // keep the NPC the slot follows now (it may have moved on while building)
+      done->follow_have = g_slot[s].follow_have;
+      std::copy(g_slot[s].follow, g_slot[s].follow + 3, done->follow);
+      done->last_skin_ns = NowNs();
+      g_slot[s] = std::move(*done);
+    }
+  }
   return g_slot[s].ready;
 }
 
@@ -329,15 +352,37 @@ bool IsBoard(uint32_t mesh) {
   return c.hi[1] < 0.3f && ex > 0.6f;
 }
 
+namespace {
+bool BuildInto(int s, int ch_id, const portal_gun::Model* chell, const std::vector<uint32_t>& parts, Slot& st);
+}  // namespace
+
 bool Build(int s, const std::vector<uint32_t>& parts) {
   if (s < 0 || s >= kSlots) return false;
   Sync(s);
-  Slot& st = g_slot[s];
   const int ch_id = SlotCharacter(s);
   const portal_gun::Model* chell = SlotModel(s);
-  if (!chell || parts.empty()) return false;
+  if (!chell || parts.empty() || NowNs() - g_build_failed_ns[s].load() < 1'000'000'000ll || g_building[s].exchange(true)) return false;
+  SetStatus(s, std::string(portal_gun::CharacterName(ch_id)) + ": building (the skater shows until it is ready)");
+  auto start = std::make_unique<Slot>();
+  start->follow_have = g_slot[s].follow_have;
+  std::copy(g_slot[s].follow, g_slot[s].follow + 3, start->follow);
+  std::thread([s, ch_id, chell, parts, st = std::move(start)]() mutable {
+    const bool ok = BuildInto(s, ch_id, chell, parts, *st);
+    if (ok) {
+      std::lock_guard<std::mutex> lock(g_pending_mutex);
+      g_pending[s] = std::move(st);
+    } else {
+      g_build_failed_ns[s] = NowNs();  // (parts not captured yet, ...): try again in a second, not every frame
+    }
+    g_building[s] = false;
+  }).detach();
+  return false;
+}
+
+namespace {
+bool BuildInto(int s, int ch_id, const portal_gun::Model* chell, const std::vector<uint32_t>& parts, Slot& st) {
   const int64_t t0 = NowNs();
-  std::lock_guard<std::mutex> lock(g_mutex);
+  std::unique_lock<std::mutex> lock(g_mutex);  // only while the captured clouds are copied (Capture runs on the render thread)
   const char* who = portal_gun::CharacterName(ch_id);
   // the skater's rest-pose cloud, every vertex tagged with its part
   std::vector<float> sk;
@@ -353,6 +398,7 @@ bool Build(int s, const std::vector<uint32_t>& parts) {
     sk_bi.insert(sk_bi.end(), c.bi.begin(), c.bi.end());
     sk_part.insert(sk_part.end(), c.pos.size() / 3, uint32_t(p));
   }
+  lock.unlock();
   const size_t nsk = sk.size() / 3;
   if (nsk < 100) return false;
   // the character's unique vertices (its own model space: y up, inches)
@@ -550,6 +596,7 @@ bool Build(int s, const std::vector<uint32_t>& parts) {
   st.last_skin_ns = NowNs();
   return true;
 }
+}  // namespace
 
 namespace {
 struct PalCtx {

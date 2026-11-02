@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <unordered_map>
 
@@ -69,6 +70,62 @@ struct Grid {
     }
     if (d2_out) *d2_out = best;
     return arg;
+  }
+};
+
+// Distance to the nearest of a point set, on a grid around a joint (cells of >= 4 cm, capped at `cap` metres): O(1) lookups for the pose
+// search. Run 199 (HANDOFF 8 panel): the search's nearest-point queries walked most of the grid for samples far from the free points, and
+// Chell's build ran over a minute on the render thread (the "semi freeze").
+struct DistField {
+  float lo[3] = {}, cell = 0.04f, cap = 0.4f;
+  int n = 1;
+  std::vector<float> d;
+  void Build(const float c[3], float half, const std::vector<float>& pts, float cap_m) {
+    cap = cap_m;
+    cell = std::max(0.04f, 2.0f * half / 48.0f);
+    n = std::clamp(int(std::ceil(2.0f * half / cell)), 1, 64);
+    for (int k = 0; k < 3; ++k) lo[k] = c[k] - half;
+    d.assign(size_t(n) * n * n, 1e9f);
+    for (size_t i = 0; i + 2 < pts.size(); i += 3) {
+      int q[3];
+      bool in = true;
+      for (int k = 0; k < 3; ++k) {
+        q[k] = int((pts[i + k] - lo[k]) / cell);
+        in &= q[k] >= 0 && q[k] < n;
+      }
+      if (in) d[(size_t(q[2]) * n + q[1]) * n + q[0]] = 0.0f;
+    }
+    // two chamfer sweeps over the 26 neighbours (forward half, then backward half)
+    for (int pass = 0; pass < 2; ++pass) {
+      const int s = pass == 0 ? 1 : -1;
+      for (int zi = 0; zi < n; ++zi) {
+        const int z = pass == 0 ? zi : n - 1 - zi;
+        for (int yi = 0; yi < n; ++yi) {
+          const int y = pass == 0 ? yi : n - 1 - yi;
+          for (int xi = 0; xi < n; ++xi) {
+            const int x = pass == 0 ? xi : n - 1 - xi;
+            float& here = d[(size_t(z) * n + y) * n + x];
+            for (int dz = -1; dz <= 0; ++dz)
+              for (int dy = -1; dy <= 1; ++dy)
+                for (int dx = -1; dx <= 1; ++dx) {
+                  if (dz == 0 && (dy > 0 || (dy == 0 && dx >= 0))) continue;  // only neighbours already swept
+                  const int X = x + s * dx, Y = y + s * dy, Z = z + s * dz;
+                  if (X < 0 || Y < 0 || Z < 0 || X >= n || Y >= n || Z >= n) continue;
+                  const float w = cell * std::sqrt(float(dx * dx + dy * dy + dz * dz));
+                  here = std::min(here, d[(size_t(Z) * n + Y) * n + X] + w);
+                }
+          }
+        }
+      }
+    }
+  }
+  float At(const float p[3]) const {
+    int q[3];
+    for (int k = 0; k < 3; ++k) {
+      q[k] = int((p[k] - lo[k]) / cell);
+      if (q[k] < 0 || q[k] >= n) return cap;
+    }
+    return std::min(cap, d[(size_t(q[2]) * n + q[1]) * n + q[0]]);
   }
 };
 
@@ -227,9 +284,14 @@ Result Retarget(const std::vector<Bone>& bones, const std::vector<float>& verts,
   }
   r.turned = 0;
   r.max_turn_deg = 0;
+  const auto t_start = std::chrono::steady_clock::now();
   for (int pass = 0; pass < std::clamp(passes, 1, 2); ++pass) {
     for (size_t b = 0; b < nb; ++b) {
       if (bones[b].parent < 0 || own_count[b] < 12) continue;
+      if (std::chrono::steady_clock::now() - t_start > std::chrono::seconds(4)) {  // never stall: what is turned so far stays
+        r.budget_hit = true;
+        break;
+      }
       std::vector<size_t> sub, rest;
       for (size_t i = 0; i < nv; ++i) (dom[i] >= 0 && size_t(dom[i]) < nb && below[b][size_t(dom[i])] ? sub : rest).push_back(i);
       if (sub.size() < 12 || sub.size() * 10 > nv * 4 || rest.empty()) continue;
@@ -259,8 +321,8 @@ Result Retarget(const std::vector<Bone>& bones, const std::vector<float>& verts,
         if (d2 > kClaim * kClaim) fp.insert(fp.end(), &dp[i], &dp[i] + 3);
       }
       if (fp.size() / 3 < 20) continue;  // the skater has nothing uncovered there: the pose already matches
-      Grid free_g;
-      free_g.Build(std::move(fp));
+      DistField free_d;
+      free_d.Build(J, 1.3f * reach + 0.1f, fp, 0.4f);
       std::vector<size_t> samp;
       const size_t sstep = std::max<size_t>(1, sub.size() / 250);
       for (size_t k = 0; k < sub.size(); k += sstep) samp.push_back(sub[k]);
@@ -271,9 +333,7 @@ Result Retarget(const std::vector<Bone>& bones, const std::vector<float>& verts,
           const float d[3] = {q[0] - J[0], q[1] - J[1], q[2] - J[2]};
           const float m[3] = {J[0] + R[0] * d[0] + R[1] * d[1] + R[2] * d[2], J[1] + R[3] * d[0] + R[4] * d[1] + R[5] * d[2],
                               J[2] + R[6] * d[0] + R[7] * d[1] + R[8] * d[2]};
-          float d2;
-          free_g.Nearest(m, &d2);
-          t += std::sqrt(d2);
+          t += free_d.At(m);
         }
         return float(t / double(samp.size()));
       };

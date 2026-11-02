@@ -1320,10 +1320,10 @@ void Overlay::OnDraw(ImGuiIO& io) {
                          ? "PORTAL GUN ON  (aim with the mouse: left click blue, right click orange, middle clear)"
                          : "PORTAL GUN ON  (hold D-pad down: right stick aims, RT blue, LT orange, Y clear, R1 grab, X cube; or Ctrl+1/2/3, Ctrl+G, Ctrl+5)");
   if (portal_gel::Mode()) {
-    ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f), "GEL MODE (%s): blue = bounce, orange = speed, clear removes gel (%d painted; Ctrl+Shift+H paint/dropper; "
-                       "Ctrl+H or D-pad down + B for portals)", portal_gel::DropperMode() ? "DROPPER" : "paint", portal_gel::Count());
+    ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f), "GEL MODE (%s): blue = bounce, orange = speed, clear removes gel (%d painted; Ctrl+H or D-pad down + B: "
+                       "paint -> dropper -> portals)", portal_gel::DropperMode() ? "DROPPER" : "paint", portal_gel::Count());
   } else if (portal_gel::Enabled()) {
-    ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "Ctrl+H or D-pad down + B: gel mode");
+    ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "Ctrl+H or D-pad down + B: gel mode (again: droppers, again: portals)");
   }
   if (REXCVAR_GET(skate3_portal_gate_clock)) {
     // Wall-clock time to the millisecond, in the log's own (local) time, so a screenshot says which log lines it matches.
