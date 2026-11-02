@@ -146,5 +146,8 @@ bool GelOverlaps(const GelPatch& a, const GelPatch& b);
 // Paints `p` over the list (`*n` entries, capacity `max`): overlapping patches of either kind are removed (new paint covers old), then p is
 // appended (the oldest is dropped when full). Returns how many were covered.
 int GelPaint(GelPatch* list, int* n, int max, const GelPatch& p);
+// The splat's outline for drawing: `segments` (3..32) world points around the centre, `lift` metres in front of the surface, counter-clockwise
+// seen from the front, with a slightly uneven rim (radius 0.76..1.0 x) seeded by the patch id so it reads as paint, not a portal.
+int GelRing(const GelPatch& g, float lift, int segments, float out[][3]);
 
 }  // namespace skate3::portal_math

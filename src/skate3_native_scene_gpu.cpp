@@ -7,6 +7,7 @@
 #include "skate3_portal_gunmodel.h"
 #include "skate3_portal_chell.h"
 #include "skate3_portal_gate.h"
+#include "skate3_portal_gel.h"
 #include "skate3_native_debug_dialog.h"
 #include "skate3_native_scene.h"
 
@@ -11345,6 +11346,63 @@ bool RenderScene(const NativeGuestOutputRenderContext& context, void* /*user_dat
     }
     if (shape_count > 0) {
       skate3::portal_gate::NoteSurfaceDrawn();
+    }
+  }
+  // Gel paint (skate3_portal_gel): the same flat, depth-tested, no-z-write spline polygons as the portal surfaces, in the portal rim colours
+  // (blue / orange), lifted 3 cm off the surface. Each splat is a convex ring drawn as a strip (0, n-1, 1, n-2, ...).
+  if (g_r.ui_ring_cpu != nullptr && g_r.pso_spline_darken != nullptr && g_r.portal_tex[0].valid && skate3::portal_gel::Count() > 0) {
+    skate3::portal_math::GelPatch gels[32];
+    const int gel_count = skate3::portal_gel::Snapshot(gels, 32);
+    int gels_drawn = 0;
+    for (int gi = 0; gi < gel_count; ++gi) {
+      const skate3::portal_math::GelPatch& gp = gels[gi];
+      const float to_cam[3] = {scene.cam_pos[0] - gp.c[0], scene.cam_pos[1] - gp.c[1], scene.cam_pos[2] - gp.c[2]};
+      if (to_cam[0] * gp.n[0] + to_cam[1] * gp.n[1] + to_cam[2] * gp.n[2] <= 0.02f) {
+        continue;  // seen from behind the surface
+      }
+      constexpr uint32_t kGelSeg = 20;
+      float ring[kGelSeg][3];
+      if (skate3::portal_math::GelRing(gp, 0.03f, int(kGelSeg), ring) != int(kGelSeg)) {
+        continue;
+      }
+      const uint32_t bytes = kGelSeg * 28;
+      if (ui_offset + bytes > RendererState::kUiRegionSize) {
+        break;
+      }
+      float* out = reinterpret_cast<float*>(g_r.ui_ring_cpu + ui_region + ui_offset);
+      int lo = 0, hi = int(kGelSeg) - 1;
+      for (uint32_t k = 0; k < kGelSeg; ++k) {
+        const int idx = (k % 2 == 0) ? lo++ : hi--;
+        float* v = out + k * 7;
+        v[0] = ring[idx][0];
+        v[1] = ring[idx][1];
+        v[2] = ring[idx][2];
+        v[3] = 1.0f;
+        v[4] = 0.0f;
+        v[5] = 0.0f;
+        v[6] = 1.0f;  // fade
+      }
+      cmd->SetPipeline(g_r.pso_spline_darken);
+      float consts[20];
+      std::memcpy(consts, scene.view_proj, sizeof(float) * 16);
+      consts[16] = 1.0f;
+      consts[17] = 1.0f;
+      consts[18] = 0.0f;
+      consts[19] = 3.0f;
+      cmd->SetRootConstants(0, 20, consts, 0);
+      cmd->SetTexture(1, g_r.portal_tex[gp.kind ? 1 : 0].srv);
+      cmd->SetVertexBuffer(g_r.ui_ring, ui_region + ui_offset, bytes, 28);
+      cmd->SetPrimitiveTopology(nrhi::PrimitiveTopology::kTriangleStrip);
+      cmd->Draw(kGelSeg, 0);
+      ui_offset += bytes;
+      ++gels_drawn;
+    }
+    if (gels_drawn > 0) {
+      skate3::portal_gel::NoteDrawn();
+    }
+    static int logged_gels = 0;
+    if (gels_drawn > 0 && logged_gels++ < 3) {
+      REXLOG_INFO("portal-gel: GEL drawn in the world: {} of {} splats (renderer)", gels_drawn, gel_count);
     }
   }
 

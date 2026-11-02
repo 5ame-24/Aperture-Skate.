@@ -1339,29 +1339,19 @@ void Overlay::OnDraw(ImGuiIO& io) {
   }
   const ImU32 colors[2] = {IM_COL32(40, 150, 255, 255), IM_COL32(255, 140, 20, 255)};
   {
-    // gel paint: translucent discs in their surface plane (screen overlay, so not hidden by walls; only within 60 m)
+    // gel paint, when the renderer did not draw it in the world: translucent splats in their surface plane (not depth-tested, within 60 m)
     portal_math::GelPatch gels[32];
-    const int ng = portal_gel::Snapshot(gels, 32);
+    const int ng = portal_gel::DrawnRecently() ? 0 : portal_gel::Snapshot(gels, 32);
     for (int i = 0; i < ng; ++i) {
       const portal_math::GelPatch& g = gels[i];
       if (tracked_valid && std::hypot(g.c[0] - tracked[0], g.c[2] - tracked[2]) > 60.0f) continue;
-      const float ref[3] = {std::abs(g.n[1]) < 0.9f ? 0.0f : 1.0f, std::abs(g.n[1]) < 0.9f ? 1.0f : 0.0f, 0.0f};
-      float t[3] = {ref[1] * g.n[2] - ref[2] * g.n[1], ref[2] * g.n[0] - ref[0] * g.n[2], ref[0] * g.n[1] - ref[1] * g.n[0]};
-      const float tl = std::sqrt(t[0] * t[0] + t[1] * t[1] + t[2] * t[2]);
-      if (tl < 1e-4f) continue;
-      for (float& c : t) c /= tl;
-      const float bt[3] = {g.n[1] * t[2] - g.n[2] * t[1], g.n[2] * t[0] - g.n[0] * t[2], g.n[0] * t[1] - g.n[1] * t[0]};
       constexpr int kGelSeg = 20;
+      float ring[kGelSeg][3];
+      if (portal_math::GelRing(g, 0.03f, kGelSeg, ring) != kGelSeg) continue;
       ImVec2 gp[kGelSeg];
       int m = 0;
       for (int k = 0; k < kGelSeg; ++k) {
-        const float a = 6.2831853f * float(k) / float(kGelSeg);
-        // a slightly uneven rim, so it reads as a splat and not a portal
-        const float rr = g.radius * (0.88f + 0.12f * std::sin(a * 5.0f + float(g.id)));
-        const float q[3] = {g.c[0] + g.n[0] * 0.03f + (std::cos(a) * t[0] + std::sin(a) * bt[0]) * rr,
-                            g.c[1] + g.n[1] * 0.03f + (std::cos(a) * t[1] + std::sin(a) * bt[1]) * rr,
-                            g.c[2] + g.n[2] * 0.03f + (std::cos(a) * t[2] + std::sin(a) * bt[2]) * rr};
-        if (project(q, &gp[m])) ++m;
+        if (project(ring[k], &gp[m])) ++m;
       }
       if (m != kGelSeg) continue;
       const ImU32 fill = g.kind ? IM_COL32(255, 106, 0, 120) : IM_COL32(0, 165, 255, 120);  // Portal 2's speed / bounce paint colours

@@ -128,6 +128,10 @@ int Snapshot(pm::GelPatch* out, int max) {
 
 const pm::GelRules& Rules() { return g_rules; }
 
+std::atomic<int64_t> g_drawn_ns{0};
+void NoteDrawn() { g_drawn_ns = NowNs(); }
+bool DrawnRecently() { return NowNs() - g_drawn_ns.load() < 250'000'000; }
+
 Effect HumanStep(const float feet[3], const float centre[3], const float v[3], bool grounded, float dt, float gravity, uint32_t frame) {
   Effect e;
   // the result of the last bounce: how high did it really go?

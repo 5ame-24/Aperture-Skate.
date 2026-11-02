@@ -425,4 +425,23 @@ int GelPaint(GelPatch* list, int* n, int max, const GelPatch& p) {
   return covered;
 }
 
+int GelRing(const GelPatch& g, float lift, int segments, float out[][3]) {
+  segments = std::clamp(segments, 3, 32);
+  // in-plane axes: t across, b = n x t, so (t, b, n) is right-handed and increasing angle runs counter-clockwise seen from the front
+  const float ref[3] = {std::abs(g.n[1]) < 0.9f ? 0.0f : 1.0f, std::abs(g.n[1]) < 0.9f ? 1.0f : 0.0f, 0.0f};
+  float t[3];
+  Cross3(ref, g.n, t);
+  const float tl = std::sqrt(Dot(t, t));
+  if (tl < 1e-5f) return 0;
+  for (float& c : t) c /= tl;
+  float b[3];
+  Cross3(g.n, t, b);
+  for (int k = 0; k < segments; ++k) {
+    const float a = 6.2831853f * float(k) / float(segments);
+    const float r = g.radius * (0.88f + 0.12f * std::sin(a * 5.0f + float(g.id % 64)));
+    for (int c = 0; c < 3; ++c) out[k][c] = g.c[c] + g.n[c] * lift + (std::cos(a) * t[c] + std::sin(a) * b[c]) * r;
+  }
+  return segments;
+}
+
 }  // namespace skate3::portal_math

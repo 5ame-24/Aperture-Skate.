@@ -668,3 +668,7 @@ Actor offsets: +1200/+1216 ground pos, +1232 delta, +1248 velocity, +1296 flags,
       measured gravity and carriers from the first crossing.
     - Not verified: whether the game keeps an upward velocity added while riding (the bounce "result" line answers it), whether the
       boost survives the game's own speed limit, overlay splats show through walls.
+    - Splats in the world: skate3_native_scene_gpu.cpp draws them after the portal surfaces with the same spline pipeline (depth test,
+      no z-write, portal rim textures), from portal_math::GelRing (tested; shared with the overlay). `GEL drawn in the world: n of m
+      splats (renderer)` (first 3 frames); the overlay stands down while the renderer draws them. NOT COMPILED HERE (SDK headers absent):
+      if the Mac build fails, the error is in that block.

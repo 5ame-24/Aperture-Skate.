@@ -449,6 +449,23 @@ int main() {
       GelPaint(list, &n, 4, far);
     }
     CHECK(n == 4 && Near(list[3].c[2], 60.0f) && Near(list[0].c[2], 30.0f));
+    // the drawn outline: in the lifted plane, inside the radius, counter-clockwise from the front (floor and wall)
+    for (const GelPatch* gp : {&floor, &wall}) {
+      float ring[20][3];
+      CHECK(GelRing(*gp, 0.03f, 20, ring) == 20);
+      for (int k = 0; k < 20; ++k) {
+        const float d[3] = {ring[k][0] - gp->c[0], ring[k][1] - gp->c[1], ring[k][2] - gp->c[2]};
+        const float hh = Dot(d, gp->n);
+        CHECK(Near(hh, 0.03f, 1e-4f));
+        const float rr = std::sqrt(Dot(d, d) - hh * hh);
+        CHECK(rr >= 0.75f * gp->radius && rr <= gp->radius + 1e-4f);
+        const float* q = ring[(k + 1) % 20];
+        const float e1[3] = {ring[k][0] - gp->c[0], ring[k][1] - gp->c[1], ring[k][2] - gp->c[2]};
+        const float e2[3] = {q[0] - gp->c[0], q[1] - gp->c[1], q[2] - gp->c[2]};
+        const float cr[3] = {e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2], e1[0] * e2[1] - e1[1] * e2[0]};
+        CHECK(Dot(cr, gp->n) > 0.0f);
+      }
+    }
   }
   std::puts("skate3_portal_math_test: ok");
   return 0;

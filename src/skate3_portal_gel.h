@@ -20,6 +20,9 @@ void Clear();
 int Count();
 int Snapshot(portal_math::GelPatch* out, int max);
 const portal_math::GelRules& Rules();
+// The renderer drew the splats this frame (depth-tested, in the world): the ImGui overlay stands down.
+void NoteDrawn();
+bool DrawnRecently();
 
 // The human, once per update. feet = ground point under the skater, centre = about 0.85 m above it, v = world velocity (m/s), grounded =
 // riding flags, gravity = m/s^2 (AIR's measured value or 9.81).
