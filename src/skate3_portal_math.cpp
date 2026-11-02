@@ -362,4 +362,67 @@ float RightRoll(Pose* p, float* omega, float dt, const RightRules& rules) {
   return aroll - std::abs(step) * 57.29578f;
 }
 
+// ---- gels ----
+bool GelTouch(const GelPatch& g, const float p[3], const GelRules& rules, float* height) {
+  const float d[3] = {p[0] - g.c[0], p[1] - g.c[1], p[2] - g.c[2]};
+  const float h = Dot(d, g.n);
+  if (height) *height = h;
+  if (h > rules.touch_above || h < -rules.touch_below) return false;
+  const float in[3] = {d[0] - h * g.n[0], d[1] - h * g.n[1], d[2] - h * g.n[2]};
+  return Dot(in, in) <= g.radius * g.radius;
+}
+
+bool GelBounce(const GelPatch& g, const float v[3], bool grounded, const GelRules& rules, float out[3]) {
+  const float vn = Dot(v, g.n);
+  const bool floor = g.n[1] > kFlatNy;
+  float out_n;
+  if (vn < -rules.min_into) {
+    out_n = std::max(-vn * rules.restitution, floor ? rules.min_bounce : rules.wall_min);
+  } else if (floor && grounded && vn < 0.5f * rules.min_bounce) {
+    out_n = rules.min_bounce;
+  } else {
+    return false;
+  }
+  for (int k = 0; k < 3; ++k) out[k] = v[k] - vn * g.n[k] + out_n * g.n[k];
+  if (!floor && g.n[1] > -kFlatNy) out[1] = std::max(out[1], rules.wall_up);  // a wall bounce is also a wall jump
+  return true;
+}
+
+float GelBoost(float speed, float dt, const GelRules& rules) {
+  if (speed < rules.boost_min_speed || speed >= rules.boost_cap) return speed;
+  return std::min(rules.boost_cap, speed + rules.boost_accel * dt);
+}
+
+bool GelOverlaps(const GelPatch& a, const GelPatch& b) {
+  if (Dot(a.n, b.n) < 0.9f) return false;
+  const float d[3] = {b.c[0] - a.c[0], b.c[1] - a.c[1], b.c[2] - a.c[2]};
+  const float h = Dot(d, a.n);
+  if (std::abs(h) > 0.3f) return false;
+  const float in[3] = {d[0] - h * a.n[0], d[1] - h * a.n[1], d[2] - h * a.n[2]};
+  const float reach = 0.75f * (a.radius + b.radius);
+  return Dot(in, in) < reach * reach;
+}
+
+int GelPaint(GelPatch* list, int* n, int max, const GelPatch& p) {
+  int kept = 0, covered = 0;
+  for (int i = 0; i < *n; ++i) {
+    if (GelOverlaps(list[i], p)) {
+      ++covered;
+    } else {
+      list[kept++] = list[i];
+    }
+  }
+  if (max <= 0) {
+    *n = kept;
+    return covered;
+  }
+  if (kept >= max) {
+    for (int i = 1; i < kept; ++i) list[i - 1] = list[i];
+    kept = max - 1;
+  }
+  list[kept++] = p;
+  *n = kept;
+  return covered;
+}
+
 }  // namespace skate3::portal_math

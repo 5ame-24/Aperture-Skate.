@@ -2,6 +2,7 @@
 
 #include "skate3_demo_path.h"
 #include "skate3_portal_chell.h"
+#include "skate3_portal_gel.h"
 #include "skate3_fov.h"
 #include "skate3_iso_installer.h"
 #include "skate3_native_render.h"
@@ -703,6 +704,8 @@ void Skate3BaseApp::OnCreateDialogs(rex::ui::ImGuiDrawer* drawer) {
                         [] { skate3::portal_gate::RequestWake(); });
   rex::ui::RegisterBind("bind_skate3_portal_selftest", "Ctrl+6", "Portal gate: self-test (drop / toss the nearest prop into the portals)",
                         [] { skate3::portal_gate::RequestSelfTest(); });
+  rex::ui::RegisterBind("bind_skate3_portal_gel", "Ctrl+H", "Portal gate: gel mode on/off (the gun paints blue bounce / orange speed gel)",
+                        [] { skate3::portal_gel::ToggleMode(); });
   rex::ui::RegisterBind("bind_skate3_portal_grab", "Ctrl+G", "Portal gate: grab / drop the companion cube",
                         [] { skate3::portal_cube::RequestGrab(); });
   rex::ui::RegisterBind("bind_skate3_menu", "Escape", "Skate 3 settings", [this] {

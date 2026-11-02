@@ -38,7 +38,9 @@ for line in open(path, errors="replace"):
     for tag in ("FLING armed", "FLING not armed", "topped up", "FLING +", "EXITFIX", "portal-props: CHAR", "HOLE kept solid", "sinking through the opening", "CHARS ",
                 "AIR arc", "AIR arc too short", "AIR gravity estimate", "AIR skeleton carriers learned", "AIR off-board updates", "also topped up",
                 "FPVTRACK re-acquired", "FPVTRACK lost", "FPVTRACK human entity locked", "unlocked", "FPVTRACK locked entity", "FPVTRACK refused",
-                "FPVTRACK ignored", "FPVTRACK accepted", "FLING not armed: crossing off the board"):
+                "FPVTRACK ignored", "FPVTRACK accepted", "FLING not armed: crossing off the board",
+                "GEL mode ON", "GEL painted", "GEL cleared", "GEL shot hit nothing", "GEL bounce on blue", "bounce held by FLING", "result: rose",
+                "never left the ground", "on orange", "left orange", "GEL prop", "GEL skipped: on foot", "AIR loaded", "AIR no saved"):
         if tag in line:
             other[tag] += 1
     if "PCAM" in line:
@@ -60,5 +62,14 @@ for actor, rows in follows.items():
 print(f"NPCX: {len(linked)} actors linked to an entity, {notsent} 'reached a portal but was not sent'")
 print("PCAM:", {k: v for k, v in pcam.items() if v} or "no lines")
 print("other:", dict(other) if other else "no lines")
+rises = [(float(m.group(1)), float(m.group(2))) for m in (re.search(r"result: rose (-?[\d.]+) m \(expected ([\d.]+) m\)", l)
+                                                          for l in open(path, errors="replace")) if m]
+if rises:
+    print("GEL bounce heights (rose / expected m):", ", ".join(f"{a:.2f}/{b:.2f}" for a, b in rises),
+          f"-> mean {sum(a for a, _ in rises) / len(rises):.2f} of {sum(b for _, b in rises) / len(rises):.2f}")
+boosts = [tuple(float(x) for x in m.groups()) for m in (re.search(r"left orange #\d+ after ([\d.]+) s: speed in ([\d.]+), peak ([\d.]+), out ([\d.]+)", l)
+                                                         for l in open(path, errors="replace")) if m]
+for b in boosts:
+    print(f"  orange ride {b[0]:.2f} s: in {b[1]:.1f}, peak {b[2]:.1f}, out {b[3]:.1f} m/s")
 for c in carries:
     print(f"  carry {c[0]:.0f} ms / {c[1]:.0f} frames, waited {c[2]:.0f} ms, max move shown {c[3]:.2f} m vs game {c[4]:.2f} m")

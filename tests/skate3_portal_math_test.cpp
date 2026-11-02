@@ -392,6 +392,64 @@ int main() {
     std::copy(qr, qr + 3, q.right);
     CHECK(Near(RightRoll(&q, &omega, 1.0f / 60, rr), 0) && Near(q.up[2], 1));
   }
+  {
+    // gels: touching a floor patch, bounce, boost, painting over
+    GelRules gr;
+    GelPatch floor;
+    floor.c[1] = 2.0f;
+    float h = 0;
+    const float above[3] = {1.0f, 2.3f, 0.5f}, high[3] = {0, 3.0f, 0}, wide[3] = {2.0f, 2.1f, 0}, sunk[3] = {0, 1.75f, 0};
+    CHECK(GelTouch(floor, above, gr, &h) && Near(h, 0.3f, 1e-5f));
+    CHECK(!GelTouch(floor, high, gr, &h));
+    CHECK(!GelTouch(floor, wide, gr, &h));
+    CHECK(GelTouch(floor, sunk, gr, &h));
+    // a 12 m/s fall comes back at 12 m/s (restitution 1), horizontal speed kept
+    float out[3];
+    const float fall[3] = {4, -12, 1};
+    CHECK(GelBounce(floor, fall, false, gr, out) && Near(out[0], 4) && Near(out[1], 12.0f) && Near(out[2], 1));
+    GelRules soft = gr;
+    soft.restitution = 0.5f;
+    CHECK(GelBounce(floor, fall, false, soft, out) && Near(out[1], gr.min_bounce));
+    // a small drop gets the minimum bounce; rolling onto it (grounded) too; moving away does nothing
+    const float drop[3] = {3, -2, 0}, roll[3] = {6, 0, 0}, rise[3] = {0, 6, 0};
+    CHECK(GelBounce(floor, drop, false, gr, out) && Near(out[1], gr.min_bounce) && Near(out[0], 3));
+    CHECK(GelBounce(floor, roll, true, gr, out) && Near(out[1], gr.min_bounce) && Near(out[0], 6));
+    CHECK(!GelBounce(floor, roll, false, gr, out));
+    CHECK(!GelBounce(floor, rise, true, gr, out));
+    // a wall patch facing +x: running into it at 8 m/s comes back at 8, along-wall part kept, at least wall_up upward; rolling past it does nothing
+    GelPatch wall;
+    wall.n[0] = 1;
+    wall.n[1] = 0;
+    const float into[3] = {-8, 1, 3}, past[3] = {0, 0, 9};
+    CHECK(GelBounce(wall, into, true, gr, out) && Near(out[0], 8.0f) && Near(out[1], gr.wall_up) && Near(out[2], 3));
+    CHECK(!GelBounce(wall, past, true, gr, out));
+    const float slow[3] = {-1, 0, 0};
+    CHECK(GelBounce(wall, slow, false, gr, out) && Near(out[0], gr.wall_min));
+    // boost: speeds up, capped, nothing from standstill
+    CHECK(Near(GelBoost(10, 0.1f, gr), 11.27f));
+    CHECK(Near(GelBoost(20.0f, 0.1f, gr), gr.boost_cap));
+    CHECK(Near(GelBoost(30, 0.1f, gr), 30));
+    CHECK(Near(GelBoost(0.5f, 0.1f, gr), 0.5f));
+    // painting: overlapping paint of either kind is covered, a wall patch next to it is not, the list is capped
+    GelPatch list[4];
+    int n = 0;
+    GelPatch a = floor, b = floor, c = floor, w2 = wall;
+    b.c[0] = 1.0f;
+    b.kind = 1;
+    c.c[0] = 10.0f;
+    w2.c[1] = 2.0f;
+    CHECK(GelPaint(list, &n, 4, a) == 0 && n == 1);
+    CHECK(GelPaint(list, &n, 4, b) == 1 && n == 1 && list[0].kind == 1);
+    CHECK(GelPaint(list, &n, 4, c) == 0 && n == 2);
+    CHECK(GelPaint(list, &n, 4, w2) == 0 && n == 3);
+    CHECK(!GelOverlaps(floor, wall));
+    for (int i = 0; i < 5; ++i) {
+      GelPatch far = floor;
+      far.c[2] = 20.0f + 10.0f * float(i);
+      GelPaint(list, &n, 4, far);
+    }
+    CHECK(n == 4 && Near(list[3].c[2], 60.0f) && Near(list[0].c[2], 30.0f));
+  }
   std::puts("skate3_portal_math_test: ok");
   return 0;
 }

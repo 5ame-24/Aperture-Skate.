@@ -111,4 +111,40 @@ struct RightRules {
 // (0 when upright or when forward is too close to vertical for "upright" to mean anything).
 float RightRoll(Pose* p, float* omega, float dt, const RightRules& rules);
 
+// ---- Portal 2 style gels (docs/specs/002-portal2-gels.md) ----
+// A gel patch: a disc of paint on a surface. kind 0 = repulsion (blue, bounce), 1 = propulsion (orange, speed).
+struct GelPatch {
+  float c[3] = {};
+  float n[3] = {0, 1, 0};  // surface normal, out of the surface
+  float radius = 1.75f;
+  int kind = 0;
+  unsigned id = 0;  // the caller's label (log numbers); not used by the maths
+};
+struct GelRules {  // defaults from Portal 2's published cvar defaults (spec 002), converted at 1 unit = 0.0254 m
+  float touch_above = 0.6f;    // a point this far in front of the surface (or less) touches the patch ...
+  float touch_below = 0.4f;    // ... down to this far behind it (the feet sink a little into the ground)
+  float restitution = 1.0f;    // repulsion: the speed into the surface comes back out times this (bounce_reflect_restitution 1.0)
+  float min_bounce = 9.25f;    // m/s out of a floor patch at least: set from a launch height (bounce_paint_min_speed 500 u/s under
+                               // sv_gravity 600 = 5.3 m) and the skater's gravity; 9.25 = 5.3 m at 8.07 m/s^2
+  float wall_min = 3.0f;       // m/s out of a wall or ceiling patch at least (ours)
+  float wall_up = 7.0f;        // m/s upward at least after a wall bounce (bounce_paint_wall_jump_upward_speed 275 u/s)
+  float min_into = 0.5f;       // m/s into the surface needed to count as hitting it (except rolling onto a floor patch; ours)
+  float boost_accel = 12.7f;   // propulsion: m/s^2 along the travel direction (sv_speed_paint_acceleration 500 u/s^2) ...
+  float boost_cap = 20.3f;     // ... up to this speed (sv_speed_paint_max 800 u/s)
+  float boost_min_speed = 1.0f;  // no push from standstill (there is no direction to push along; ours)
+};
+// Inside the disc (in-plane distance <= radius) and within [-touch_below, touch_above] of its plane; `height` = signed distance in front.
+bool GelTouch(const GelPatch& g, const float p[3], const GelRules& rules, float* height);
+// Repulsion: the velocity after touching patch g with velocity v. Moving into it: the normal part flips, times restitution, and is at least
+// min_bounce (floor) or wall_min (wall/ceiling); the in-plane part is kept; off a wall the upward part is at least wall_up. On a floor patch while grounded and not already rising at half
+// of min_bounce: the normal part becomes min_bounce. Otherwise (moving away, or along a wall) false.
+bool GelBounce(const GelPatch& g, const float v[3], bool grounded, const GelRules& rules, float out[3]);
+// Propulsion: the speed after dt on an orange patch (never slower than `speed`).
+float GelBoost(float speed, float dt, const GelRules& rules);
+// Same surface (normals within ~25 degrees, planes within 0.3 m) and the discs overlap by more than a quarter of their radii.
+bool GelOverlaps(const GelPatch& a, const GelPatch& b);
+// Paints `p` over the list (`*n` entries, capacity `max`): overlapping patches of either kind are removed (new paint covers old), then p is
+// appended (the oldest is dropped when full). Returns how many were covered.
+int GelPaint(GelPatch* list, int* n, int max, const GelPatch& p);
+
 }  // namespace skate3::portal_math

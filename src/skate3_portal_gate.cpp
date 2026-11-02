@@ -1,5 +1,6 @@
 #include "skate3_portal_cube.h"
 #include "skate3_portal_gate.h"
+#include "skate3_portal_gel.h"
 #include "skate3_portal_math.h"
 
 #include <algorithm>
@@ -271,6 +272,10 @@ void Request(int what) {
   REXLOG_INFO("portal-gate: key bind {} received (gate {})", what, Enabled() ? "enabled" : "DISABLED");
   if (Enabled() && now - last_ns.load() > 500'000'000) {
     last_ns = now;
+    if (what == 2 && portal_gel::Mode()) {  // in gel mode "clear" removes the paint, the portals stay
+      portal_gel::Clear();
+      return;
+    }
     g_pending = what;
     if (what == 0 || what == 1) {
       g_fire_which = what;
@@ -994,8 +999,8 @@ bool FpvHeadPos(float out[3]) {
 }
 
 void FilterPad(uint16_t* buttons, uint8_t* left_trigger, uint8_t* right_trigger, int16_t* rx, int16_t* ry) {
-  constexpr uint16_t kY = 0x8000, kR3 = 0x0080, kX = 0x4000, kR1 = 0x0200;  // XInput button bits
-  static bool was_rt = false, was_lt = false, was_y = false, was_r3 = false, was_x = false, was_r1 = false;
+  constexpr uint16_t kY = 0x8000, kR3 = 0x0080, kX = 0x4000, kR1 = 0x0200, kB = 0x2000;  // XInput button bits
+  static bool was_rt = false, was_lt = false, was_y = false, was_r3 = false, was_x = false, was_r1 = false, was_b = false;
   static auto last = std::chrono::steady_clock::now();
   const auto now = std::chrono::steady_clock::now();
   const float dt = std::min(0.1f, std::chrono::duration<float>(now - last).count());
@@ -1014,7 +1019,7 @@ void FilterPad(uint16_t* buttons, uint8_t* left_trigger, uint8_t* right_trigger,
   // L1 + D-pad down is the game's own "return to marker": L1 held means that, not portal mode.
   constexpr uint16_t kL1 = 0x0100;
   if ((*buttons & mod) != mod || (*buttons & kL1)) {
-    was_rt = was_lt = was_y = was_r3 = was_x = was_r1 = false;
+    was_rt = was_lt = was_y = was_r3 = was_x = was_r1 = was_b = false;
     return;
   }
   if (!FpvActive()) {
@@ -1029,6 +1034,9 @@ void FilterPad(uint16_t* buttons, uint8_t* left_trigger, uint8_t* right_trigger,
     *ry = 0;
   }
   const bool rt = *right_trigger > 128, lt = *left_trigger > 128, y = *buttons & kY, r3 = *buttons & kR3, x = *buttons & kX, r1 = *buttons & kR1;
+  const bool b = *buttons & kB;
+  if (b && !was_b) portal_gel::ToggleMode();
+  was_b = b;
   if (rt && !was_rt) Request(0);
   if (lt && !was_lt) Request(1);
   if (y && !was_y) Request(2);
@@ -1052,7 +1060,7 @@ void FilterPad(uint16_t* buttons, uint8_t* left_trigger, uint8_t* right_trigger,
     *rx = 0;
     *ry = 0;
   }
-  *buttons = uint16_t(*buttons & ~(mod | kY | kR3 | kX | kR1));
+  *buttons = uint16_t(*buttons & ~(mod | kY | kR3 | kX | kR1 | kB));
   *left_trigger = 0;
   *right_trigger = 0;
 }
@@ -1265,6 +1273,12 @@ void Overlay::OnDraw(ImGuiIO& io) {
                      REXCVAR_GET(skate3_portal_gate_mouse)
                          ? "PORTAL GUN ON  (aim with the mouse: left click blue, right click orange, middle clear)"
                          : "PORTAL GUN ON  (hold D-pad down: right stick aims, RT blue, LT orange, Y clear, R1 grab, X cube; or Ctrl+1/2/3, Ctrl+G, Ctrl+5)");
+  if (portal_gel::Mode()) {
+    ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f), "GEL MODE: blue = bounce, orange = speed, clear removes gel (%d painted; Ctrl+H or D-pad down + B for portals)",
+                       portal_gel::Count());
+  } else if (portal_gel::Enabled()) {
+    ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "Ctrl+H or D-pad down + B: gel mode");
+  }
   if (REXCVAR_GET(skate3_portal_gate_clock)) {
     // Wall-clock time to the millisecond, in the log's own (local) time, so a screenshot says which log lines it matches.
     const auto wall = std::chrono::system_clock::now();
@@ -1324,6 +1338,42 @@ void Overlay::OnDraw(ImGuiIO& io) {
     tracked_valid = g_tracked_valid;
   }
   const ImU32 colors[2] = {IM_COL32(40, 150, 255, 255), IM_COL32(255, 140, 20, 255)};
+  {
+    // gel paint: translucent discs in their surface plane (screen overlay, so not hidden by walls; only within 60 m)
+    portal_math::GelPatch gels[32];
+    const int ng = portal_gel::Snapshot(gels, 32);
+    for (int i = 0; i < ng; ++i) {
+      const portal_math::GelPatch& g = gels[i];
+      if (tracked_valid && std::hypot(g.c[0] - tracked[0], g.c[2] - tracked[2]) > 60.0f) continue;
+      const float ref[3] = {std::abs(g.n[1]) < 0.9f ? 0.0f : 1.0f, std::abs(g.n[1]) < 0.9f ? 1.0f : 0.0f, 0.0f};
+      float t[3] = {ref[1] * g.n[2] - ref[2] * g.n[1], ref[2] * g.n[0] - ref[0] * g.n[2], ref[0] * g.n[1] - ref[1] * g.n[0]};
+      const float tl = std::sqrt(t[0] * t[0] + t[1] * t[1] + t[2] * t[2]);
+      if (tl < 1e-4f) continue;
+      for (float& c : t) c /= tl;
+      const float bt[3] = {g.n[1] * t[2] - g.n[2] * t[1], g.n[2] * t[0] - g.n[0] * t[2], g.n[0] * t[1] - g.n[1] * t[0]};
+      constexpr int kGelSeg = 20;
+      ImVec2 gp[kGelSeg];
+      int m = 0;
+      for (int k = 0; k < kGelSeg; ++k) {
+        const float a = 6.2831853f * float(k) / float(kGelSeg);
+        // a slightly uneven rim, so it reads as a splat and not a portal
+        const float rr = g.radius * (0.88f + 0.12f * std::sin(a * 5.0f + float(g.id)));
+        const float q[3] = {g.c[0] + g.n[0] * 0.03f + (std::cos(a) * t[0] + std::sin(a) * bt[0]) * rr,
+                            g.c[1] + g.n[1] * 0.03f + (std::cos(a) * t[1] + std::sin(a) * bt[1]) * rr,
+                            g.c[2] + g.n[2] * 0.03f + (std::cos(a) * t[2] + std::sin(a) * bt[2]) * rr};
+        if (project(q, &gp[m])) ++m;
+      }
+      if (m != kGelSeg) continue;
+      const ImU32 fill = g.kind ? IM_COL32(255, 106, 0, 120) : IM_COL32(0, 165, 255, 120);  // Portal 2's speed / bounce paint colours
+      const ImU32 rim = g.kind ? IM_COL32(255, 170, 60, 220) : IM_COL32(90, 180, 255, 220);
+      // the splat is convex enough for a fan from the centre
+      ImVec2 cc;
+      if (project(g.c, &cc)) {
+        for (int k = 0; k < kGelSeg; ++k) dl->AddTriangleFilled(cc, gp[k], gp[(k + 1) % kGelSeg], fill);
+      }
+      dl->AddPolyline(gp, kGelSeg, rim, ImDrawFlags_Closed, 3.0f);
+    }
+  }
   const bool world_surfaces = SurfaceDrawnRecently();
   for (int i = 0; i < 2; ++i) {
     if (!gates[i].active || world_surfaces) {

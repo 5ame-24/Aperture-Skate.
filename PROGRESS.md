@@ -650,3 +650,21 @@ Actor offsets: +1200/+1216 ground pos, +1232 delta, +1248 velocity, +1296 flags,
     - Re-acquire, jump guard and AIR unchanged (AIR worked: 24 clean arcs, g median 8.07 m/s^2, carrier skeleton+0x28E0 in 20 of 24).
     - `[f N]` (the human's GateStep update count) on every FPVTRACK and FLING line, drawn in yellow under the on-screen clock (top right,
       skate3_portal_gate_clock, on by default): a screenshot or phone video matches log lines. leaplog.py strips the stamp.
+61. Portal 2 gels (built, untested): spec docs/specs/002-portal2-gels.md (public cvar defaults), cvar skate3_portal_gel (on).
+    - Gel mode: Ctrl+H or D-pad down + B. The gun's blue / orange shots then paint a 1.75 m splat (portal_gel::Paint) instead of placing
+      a portal; Clear in gel mode removes the paint only. Banner "GEL MODE"; splats drawn in the ImGui overlay (Portal 2's paint colours,
+      not depth-tested, within 60 m).
+    - Pure maths in portal_math (GelTouch / GelBounce / GelBoost / GelOverlaps / GelPaint) with unit tests. Defaults from Portal 2:
+      restitution 1, floor launch 5.3 m (skate3_portal_gel_bounce_height, turned into a speed with AIR's gravity: 9.25 m/s at 8.07),
+      wall jump 7 m/s up, speed paint 12.7 m/s^2 up to 20.3 m/s (skate3_portal_gel_boost_cap).
+    - Human (GateStep, after the velocity estimate): blue = AddVelocity(v_out - v) then the FLING hold (skate3_portal_fling_frames);
+      orange = AddVelocity along the horizontal travel direction each update while riding on floor paint. Nothing on foot (state 500).
+      Logs: `GEL [f N] bounce on blue #k`, `... result: rose X m (expected Y m)` (the real height of each floor bounce), `on orange` /
+      `left orange ... speed in, peak, out`.
+    - Props (82AE6590 hook): loose bodies touching blue paint get their velocity reflected (restitution 1, no minimum), not the skater's
+      or characters' bodies. `GEL prop ... bounced off blue paint`.
+    - AIR now keeps its measurement between runs: skate3_portal_air.txt in the working directory (out/build/macos-release, git-ignored),
+      "gravity G arcs N mask M"; loaded at the first update (`AIR loaded from ...` / `AIR no saved measurement`), so FLING and GEL use the
+      measured gravity and carriers from the first crossing.
+    - Not verified: whether the game keeps an upward velocity added while riding (the bounce "result" line answers it), whether the
+      boost survives the game's own speed limit, overlay splats show through walls.

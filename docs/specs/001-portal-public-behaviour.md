@@ -5,7 +5,7 @@ Source: public descriptions only (no game files, no code). Written by the implem
 - Valve Developer Community pages "Portal funneling" and "Prop portal" (seen through search summaries; the site itself is not reachable
   from the cloud session).
 Units: Hammer units, 1 unit = 1 inch = 0.0254 m. Local numbers from the user's own Portal 2 install come from
-`tools/re/portal2_facts.py` (spec 002 once run).
+`tools/re/portal2_facts.py` (docs/handoff-feedback-4.md; spec 003 when written up).
 
 ## Movement and velocity
 - **Momentum through portals**: the in-game rule is that speed relative to the exit portal equals speed relative to the entry portal

@@ -18,6 +18,7 @@
 #include <cstdio>
 #include <cstring>
 #include <deque>
+#include <fstream>
 #include <initializer_list>
 #include <mutex>
 #include <unordered_map>
@@ -31,6 +32,7 @@
 #include "native/skate3_native_entity.h"
 #include "skate3_portal_cube.h"
 #include "skate3_portal_gate.h"
+#include "skate3_portal_gel.h"
 #include "skate3_portal_math.h"
 #include "native/skate3_native_guest_read.h"
 
@@ -112,6 +114,8 @@ bool BodiesGrabToggle(uint8_t* base, const float skater[3], const float skater_v
                       bool aim_ok, const float hand[3], float cube_score);
 
 namespace {
+
+uint32_t g_gate_frame = 0;  // GateStep updates of the human (the [f N] in FPVTRACK, FLING and GEL lines, also drawn under the on-screen clock)
 
 constexpr uint32_t kScanBytes = 0x1000;
 constexpr float kTolerance = 1.5f;  // the actor's COM sits above the entity root
@@ -589,6 +593,11 @@ void CollectRay(PPCContext& ctx, uint8_t* base) {
     r[10] = -r[10];
     REXLOG_INFO("portal-probe: GUN normal pointed along the shot; flipped to face the shooter");
   }
+  if (skate3::portal_gel::Mode()) {  // gel mode: the shot paints instead of placing a portal (no fallback ring when it hits nothing)
+    if (hit) skate3::portal_gel::Paint(g_ray.which, r, r + 8, g_gate_frame);
+    else REXLOG_INFO("portal-gel: GEL [f {}] shot hit nothing, no paint", g_gate_frame);
+    return;
+  }
   if (!hit || !skate3::portal_gate::PlaceOn(g_ray.which, r, r + 8, g_ray.d)) {
     GunFallback(g_ray.fallback);
   }
@@ -845,7 +854,6 @@ struct Fling {
   float gravity = 9.81f;  // the AIR probe's measured value once 3+ clean arcs agree, else assumed
 };
 Fling g_fling;
-uint32_t g_gate_frame = 0;  // GateStep updates of the human (the [f N] in FPVTRACK and FLING lines, also drawn under the on-screen clock)
 std::atomic<uint32_t> g_human_entity{0};  // the human's presentation entity (nearest skater entity to the tracked point)
 
 void FlingFrame(uint8_t* base, uint32_t self) {
@@ -951,6 +959,34 @@ int64_t g_last_cross_ns = 0;
 // votes per vector; the mask holds the ones with 3+ votes, which FLING then tops up too.
 int g_air_skel_votes[kAirSkel] = {};
 
+// What AIR measured, kept between runs in skate3_portal_air.txt next to the executable's working directory (out/build/..., git-ignored), so
+// FLING and GEL use the measured gravity and carriers from the first crossing instead of after 3 arcs. One line: "gravity G arcs N mask M".
+constexpr const char* kAirFile = "skate3_portal_air.txt";
+void AirLoad() {
+  std::ifstream in(kAirFile);
+  float g = 0;
+  int n = 0;
+  unsigned mask = 0;
+  std::string w1, w2, w3;
+  if (!(in >> w1 >> g >> w2 >> n >> w3 >> std::hex >> mask) || w1 != "gravity" || !(g > 3.0f && g < 40.0f)) {
+    REXLOG_INFO("portal-probe: AIR no saved measurement in {} (first run, or unreadable): gravity 9.81 assumed until 3 arcs", kAirFile);
+    return;
+  }
+  g_air_gravity = g;
+  g_air_gravity_n = 3;  // counts as measured
+  g_air_g.assign(std::clamp(n, 1, 5), g);  // the saved median weighs as up to 5 arcs, so one noisy new arc cannot replace it
+  g_air_skel_mask = mask & ((1u << kAirSkel) - 1);
+  for (int k = 0; k < kAirSkel; ++k) {
+    if (mask & (1u << k)) g_air_skel_votes[k] = 3;
+  }
+  REXLOG_INFO("portal-probe: AIR loaded from {}: gravity {:.2f} m/s^2 (from {} arcs), carriers mask {:07X}", kAirFile, g, n, mask);
+}
+void AirSave(float g, int n, uint32_t mask) {
+  std::ofstream out(kAirFile, std::ios::trunc);
+  if (!out) return;
+  out << "gravity " << g << " arcs " << n << " mask " << std::hex << mask << "\n";
+}
+
 void AirFinish(const char* why) {
   namespace pm = skate3::portal_math;
   std::vector<AirSample> s;
@@ -1046,7 +1082,8 @@ void AirFinish(const char* why) {
     std::vector<float> sorted = g_air_g;
     std::sort(sorted.begin(), sorted.end());
     g_air_gravity = sorted[sorted.size() / 2];
-    g_air_gravity_n = int(g_air_g.size());
+    g_air_gravity_n = std::max(int(g_air_g.size()), g_air_gravity_n.load());
+    AirSave(g_air_gravity.load(), int(g_air_g.size()), g_air_skel_mask.load());
   }
   if (g_air_arcs > 60) return;
   REXLOG_INFO("portal-probe: AIR arc #{} ({}): {:.2f} s, {} samples, start speed {:.1f} m/s; gravity from the path {:.2f} m/s^2 (r2 {:.4f}){}",
@@ -1328,6 +1365,11 @@ float g_track_exit[3] = {};
 bool GateStep(PPCContext& ctx, uint8_t* base, uint32_t self) {
   if (g_track_since_cross < 1000) ++g_track_since_cross;
   skate3::portal_gate::SetGameFrame(++g_gate_frame);
+  static bool air_loaded = false;
+  if (!air_loaded) {
+    air_loaded = true;
+    AirLoad();
+  }
   const uint32_t sp = ctx.r1.u32;
   static float tracked[3], last[3];
   static bool have = false;
@@ -1470,6 +1512,46 @@ bool GateStep(PPCContext& ctx, uint8_t* base, uint32_t self) {
       if (ReadBe32(base, self + 1880, &bd) && ReadBe32(base, bd + 12, &bk) && bk >= 0x10000) ReadVec(base, bk + kLinRates, bv);
       REXLOG_INFO("portal-probe: TRACE after crossing, {} frames left: state {} flags {:08X} y {:.2f} speed {:.1f} actorV ({:.1f},{:.1f},{:.1f}) boardV ({:.1f},{:.1f},{:.1f})",
                   trace_left, st, flags, p[1], speed_now, av[0], av[1], av[2], bv[0], bv[1], bv[2]);
+    }
+  }
+  {
+    // GEL (skate3_portal_gel): blue paint bounces, orange paint speeds the board up. Same velocity stores as FUNNEL (AddVelocity); a bounce
+    // is then held by the FLING machinery for skate3_portal_fling_frames updates, since the game replaces a one-off change within 1-2 frames.
+    static auto gel_t = std::chrono::steady_clock::now();
+    const auto now_t = std::chrono::steady_clock::now();
+    const float gdt = std::min(0.1f, std::chrono::duration<float>(now_t - gel_t).count());
+    gel_t = now_t;
+    uint32_t gstate = 0;
+    ReadBe32(base, self + 1336, &gstate);
+    if (skate3::portal_gel::Count() > 0 && have && !(flags & kRelocateBit)) {
+      static int logged_foot = 0;
+      const float feet[3] = {p[0], p[1] - up_offset, p[2]};
+      const float gravity = g_air_gravity_n.load() >= 3 ? g_air_gravity.load() : 9.81f;
+      if (gstate == 500) {
+        // off the board the board is not under the skater: pushing its rates would launch the loose board (as with FLING)
+        if (logged_foot++ < 5) REXLOG_INFO("portal-gel: GEL [f {}] skipped: on foot (state 500), gel only acts on the board", g_gate_frame);
+      } else {
+        const skate3::portal_gel::Effect ge = skate3::portal_gel::HumanStep(feet, p, vel3, riding, gdt, gravity, g_gate_frame);
+        if (ge.kind == skate3::portal_gel::Effect::kBounce) {
+          AddVelocity(base, self, ge.dv);
+          const float sp = std::sqrt(ge.v_out[0] * ge.v_out[0] + ge.v_out[1] * ge.v_out[1] + ge.v_out[2] * ge.v_out[2]);
+          if (REXCVAR_GET(skate3_portal_fling) && sp > 1.0f) {
+            g_fling = Fling{};
+            g_fling.left = std::clamp(int(REXCVAR_GET(skate3_portal_fling_frames)), 0, 120);
+            g_fling.speed = std::min(sp, kMaxExitSpeed);
+            for (int c = 0; c < 3; ++c) {
+              g_fling.dir[c] = ge.v_out[c] / sp;
+              g_fling.vout[c] = g_fling.dir[c] * g_fling.speed;
+            }
+            g_fling.t0 = std::chrono::steady_clock::now().time_since_epoch().count();
+            g_fling.gravity = gravity;
+            REXLOG_INFO("portal-gel: GEL [f {}] bounce held by FLING for {} frames ({:.1f} m/s, gravity {:.2f})", g_gate_frame, g_fling.left,
+                        g_fling.speed, gravity);
+          }
+        } else if (ge.kind == skate3::portal_gel::Effect::kBoost) {
+          AddVelocity(base, self, ge.dv);
+        }
+      }
     }
   }
   // Crossings need the game to report the skater as airborne (flags 0x90000000 / 0x8E000000: top bit set,
@@ -3408,6 +3490,20 @@ extern "C" REX_FUNC(sub_82AE6590) {
   const uint32_t body = ctx.r3.u32;
   __imp__sub_82AE6590(ctx, base);
   if (skate3::portal_gate::Enabled()) RecordBody(base, body);
+  if (skate3::portal_gel::Count() > 0 && skate3::portal_gel::Enabled() && body >= 0x10000 && body < 0xC0000000 && !(body & 3)) {
+    // GEL: loose props bounce off blue paint (velocity at body+32, position at +16). Not the skater's or a character's bodies.
+    float bp[3], bv[3], nv[3];
+    if (ReadVec(base, body + 16, bp) && ReadVec(base, body + 32, bv) && skate3::portal_gel::BodyStep(bp, bv, nv) &&
+        !skate3::portal_gate::BodyIsSkaters(body, bp) && !skate3::portal_gate::NearCharacter(bp, 1.3f)) {
+      for (int c = 0; c < 3; ++c) WriteBeFloat(base, body + 32 + 4 * c, nv[c]);
+      static std::atomic<int> bounced{0};
+      const int k = bounced.fetch_add(1) + 1;
+      if (k <= 20 || k % 200 == 0) {
+        REXLOG_INFO("portal-gel: GEL prop {:08X} bounced off blue paint (#{}): v ({:.1f}, {:.1f}, {:.1f}) -> ({:.1f}, {:.1f}, {:.1f}) at ({:.2f}, {:.2f}, {:.2f})",
+                    body, k, bv[0], bv[1], bv[2], nv[0], nv[1], nv[2], bp[0], bp[1], bp[2]);
+      }
+    }
+  }
 }
 
 // The portal hole: 8277B720 is the world-triangle vs moving-primitive contact query. r3 = the moving primitive (world
