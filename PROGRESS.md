@@ -914,3 +914,14 @@ Actor offsets: +1200/+1216 ground pos, +1232 delta, +1248 velocity, +1296 flags,
     - gel: an airborne blue bounce starts a carry at once; a grounded bounce (the lift relocation) is treated like a crossing's launch
       after its teleport (pop + carry when upward).
     - rule (5) of the crossing pipeline (PROGRESS 75) is now: the exit velocity is CARRIED (bodies), and held in the stores as before.
+82. Run 215 (carry everywhere): bridge falls fly near the rule (#8: rule 4.4 m, rose 3.95), but floor->wall kept 52-57%, heading off 29-52
+    deg, FACING off 86 deg; rolling wall->floor launches ("fell in at 0.0", out 9.1 m/s up) did not leave (bodies' vy as the game left it
+    2.3, 0.9, ...). Built (untested):
+    - Exit heading: with real horizontal exit speed (>= 1 m/s) the board points ALONG the exit velocity; the turned facing only chooses
+      forward or fakie. A floor->wall pair turns a horizontal facing into one along the wall: the board left sideways and the riding model
+      steered along it, bending the path and scrubbing half the speed. The turned facing alone is used only for slow / near-vertical exits.
+    - Position carry: for the first skate3_portal_carry_position_s (0.25 s) of an upward launch the skater's bodies are also MOVED along the
+      launch arc (each from where it was at the start, all by the same offset), not only given its velocity.
+    - "fell in at 0.0" with "out at 9 m/s up" is a rolling wall->floor launch (no fall; the speed comes from rolling in), a real launch.
+    - One `EXIT [f N] wall->floor: v_out (...) S m/s; board points (...) from the velocity / fakie / facing / last heading; carried T s` line
+      per crossing replaces the facing lines.

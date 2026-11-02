@@ -81,6 +81,11 @@ REXCVAR_DEFINE_DOUBLE(skate3_portal_gate_riding_lift, 0.6, "Skate 3",
                       "the restored velocity (state-100 crossings kept ~45%, airborne ones 96%). 0 = off.")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
+REXCVAR_DEFINE_DOUBLE(skate3_portal_carry_position_s, 0.25, "Skate 3",
+                      "Upward launches: for this many seconds the skater's bodies are also MOVED along the launch arc (all by the same offset), "
+                      "not only given its velocity, so the game cannot pull them back to the ground (0 = velocity only).")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
 REXCVAR_DEFINE_DOUBLE(skate3_portal_carry_short, 0.4, "Skate 3",
                       "Seconds a crossing that does not launch you upward (wall exits, angled, downward) is carried at its exit velocity, so the game "
                       "takes the speed over (upward launches are carried to the top of the arc).")
@@ -879,11 +884,23 @@ struct Carry {
   // the bodies' upward speed as the game left it (before our write), per 1/30 s for the first 10 frames: does the game fight the carry?
   std::atomic<float> vy_sum[10] = {};
   std::atomic<int> vy_n[10] = {};
+  // position carry (upward launches, first skate3_portal_carry_position_s): every body moves by the same arc offset from where it was at
+  // the start (run 215: a rolling wall->floor launch "out at 9.1 m/s up" never left: the game pulled the bodies' vy back to 2.3, 0.9, ...)
+  int64_t pos_until = 0;
+  std::unordered_map<uint32_t, std::array<float, 3>> p0;  // guarded by g_carry_mutex
 } g_carry;
+std::mutex g_carry_mutex;
 // One mechanism for every momentum effect (run 214: carry FLEW where every store top-up failed): the skater's own physics bodies get
 // v(t) = v - g t after each rigid-body update for `seconds`. Used by every crossing (after the teleport), gel bounces, on foot and on board.
 void StartCarry(const float v[3], float gravity, float seconds) {
   const int64_t now = std::chrono::steady_clock::now().time_since_epoch().count();
+  {
+    std::lock_guard<std::mutex> lock(g_carry_mutex);
+    g_carry.p0.clear();
+    const float l = std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+    const bool upward = v[1] > 0.3f * l && v[1] > 1.0f;
+    g_carry.pos_until = upward ? now + int64_t(float(REXCVAR_GET(skate3_portal_carry_position_s)) * 1e9) : 0;
+  }
   std::copy(v, v + 3, g_carry.vout);
   g_carry.gravity = gravity;
   g_carry.t0 = now;
@@ -2678,20 +2695,23 @@ bool GateStep(PPCContext& ctx, uint8_t* base, uint32_t self) {
   } else if (g_facing_axis >= 0) {
     facing_why = "your entity matrix is not readable";
   }
-  if (!use_facing) {
-    int ax = -1;
-    float sg = 0, ag = 0;
-    g_facing.Best(&ax, &sg, &ag);
-    REXLOG_INFO("portal-probe: GATE [f {}] exit facing from the velocity: {} (facing axis {}, agreement {:.2f}, {} samples)", g_gate_frame, facing_why, ax,
-                ag, g_facing.n);
-  }
-  if (use_facing) {
-    // your own facing, turned through the pair (fakie stays fakie, an angled entry stays angled relative to the exit portal)
+  const char* heading_from = "velocity";
+  if (len >= 1.0f) {
+    // Moving out with real horizontal speed: the board points along the velocity (a board rolls where it points; run 215: floor->wall
+    // exits faced 86 deg off their motion, the riding model steered along the board: 52% kept, 29-52 deg off). Your turned facing only
+    // picks forward or fakie (fakie stays fakie).
+    hx = vout[0];
+    hz = vout[2];
+    if (use_facing && facing_out[0] * vout[0] + facing_out[2] * vout[2] < 0.0f) {
+      hx = -hx;
+      hz = -hz;
+      heading_from = "velocity, fakie (your facing)";
+    }
+  } else if (use_facing) {
+    // slow or near-vertical exit: your own facing, turned through the pair
     hx = facing_out[0];
     hz = facing_out[2];
-    REXLOG_INFO("portal-probe: GATE [f {}] exit facing from your facing (axis {}): in ({:.2f}, {:.2f}, {:.2f}) -> out ({:.2f}, {:.2f}, {:.2f}); "
-                "velocity heading out ({:.2f}, {:.2f})", g_gate_frame, facing_axis, facing_in[0], facing_in[1], facing_in[2], facing_out[0],
-                facing_out[1], facing_out[2], len > 0.01f ? vout[0] / len : 0.0f, len > 0.01f ? vout[2] / len : 0.0f);
+    heading_from = "your facing turned through the pair";
     len = std::hypot(hx, hz);
   } else if (len < 0.5f && std::hypot(g_last_heading[0], g_last_heading[1]) > 0.5f) {
     // Falling (nearly) straight in, or straight out (floor <-> ceiling, floor -> floor): the exit velocity has no heading. Keep your own
@@ -2703,8 +2723,7 @@ bool GateStep(PPCContext& ctx, uint8_t* base, uint32_t self) {
     hx = tl > 0.3f ? ht[0] : h3[0];
     hz = tl > 0.3f ? ht[2] : h3[2];
     len = std::hypot(hx, hz);
-    REXLOG_INFO("portal-probe: GATE [f {}] exit heading from your last heading ({:.2f}, {:.2f}){}: the exit velocity is vertical", g_gate_frame, h3[0],
-                h3[2], tl > 0.3f ? ", turned through the pair" : ", kept");
+    heading_from = tl > 0.3f ? "last heading turned through the pair (vertical exit)" : "last heading (vertical exit)";
   } else if (len < 0.5f) {
     hx = cross.exit_dir[0];
     hz = cross.exit_dir[1];
@@ -2720,6 +2739,14 @@ bool GateStep(PPCContext& ctx, uint8_t* base, uint32_t self) {
   }
   hx /= len;
   hz /= len;
+  {
+    // one line per crossing: what comes out, which way the board points and why, what will be carried
+    const float g_c = g_air_gravity_n.load() >= 3 ? g_air_gravity.load() : 9.81f;
+    REXLOG_INFO("portal-probe: EXIT [f {}] {}->{}: v_out ({:.1f}, {:.1f}, {:.1f}) {:.1f} m/s; board points ({:.2f}, {:.2f}) from the {}{}; carried {:.2f} s",
+                g_gate_frame, SurfaceKind(cross.entry_n), SurfaceKind(cross.exit_n), vout[0], vout[1], vout[2],
+                std::sqrt(vout[0] * vout[0] + vout[1] * vout[1] + vout[2] * vout[2]), hx, hz, heading_from,
+                use_facing || facing_why[0] == 0 ? "" : (std::string(" (facing not used: ") + facing_why + ")").c_str(), CarrySeconds(vout, g_c));
+  }
   float change = 0.0f;  // how far the matrix is from "no change"
   for (int k = 0; k < 9; ++k) change = std::max(change, std::abs(cross.vel[k] - ((k % 4 == 0) ? 1.0f : 0.0f)));
   REXLOG_INFO("portal-probe: GATE velocity in ({:.1f}, {:.1f}, {:.1f}) out ({:.1f}, {:.1f}, {:.1f}), matrix change {:.2f}",
@@ -4645,6 +4672,20 @@ extern "C" REX_FUNC(sub_82AE6590) {
           g_carry.vy_n[bucket].fetch_add(1);
         }
         const float v[3] = {g_carry.vout[0], g_carry.vout[1] - g_carry.gravity * t, g_carry.vout[2]};
+        if (now < g_carry.pos_until) {
+          float p[3];
+          if (ReadVec(base, body + 16, p)) {
+            std::array<float, 3> start;
+            {
+              std::lock_guard<std::mutex> lock(g_carry_mutex);
+              auto it = g_carry.p0.find(body);
+              if (it == g_carry.p0.end()) it = g_carry.p0.emplace(body, std::array<float, 3>{p[0], p[1], p[2]}).first;
+              start = it->second;
+            }
+            const float d[3] = {g_carry.vout[0] * t, g_carry.vout[1] * t - 0.5f * g_carry.gravity * t * t, g_carry.vout[2] * t};
+            for (int c = 0; c < 3; ++c) WriteBeFloat(base, body + 16 + 4 * c, start[c] + d[c]);
+          }
+        }
         for (int c = 0; c < 3; ++c) WriteBeFloat(base, body + 32 + 4 * c, v[c]);
         g_carry.writes.fetch_add(1, std::memory_order_relaxed);
       }
