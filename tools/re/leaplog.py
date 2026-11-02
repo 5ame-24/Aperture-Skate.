@@ -42,7 +42,7 @@ for line in open(path, errors="replace"):
                 "GEL mode ON", "GEL painted", "GEL cleared", "GEL shot hit nothing", "GEL bounce on blue", "bounce held by FLING", "result: rose",
                 "never left the ground", "on orange", "left orange", "GEL prop", "GEL skipped: on foot", "shot went into the", "GEL drawn in the world", "AIR loaded", "AIR no saved", "CHAR you:", "CHAR co-op", "follows the NPC", "own skeleton", "no skeleton in the cache",
                 "skeleton now draws", "CHAR slot", "reset (", "CHARSEL",
-                "lift armed", "lift done", "lift skipped", "lift refused", "boost: cached speed", ": held", "overwritten", "riding: lift", "capped", "dropper placed", "gun sub-mode", "went through the", "blob paint #", "droppers cleared", "set to", "(panel)", "building (", "GEL key Ctrl+Shift+H", "blob ray", "GEL mode ON", "DROPPER", "pointer pass", " place "):
+                "lift armed", "lift done", "lift skipped", "lift refused", "boost: cached speed", ": held", "overwritten", "riding: lift", "capped"):
         if tag in line:
             other[tag] += 1
     if "PCAM" in line:

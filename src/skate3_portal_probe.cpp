@@ -622,8 +622,7 @@ void CollectRay(PPCContext& ctx, uint8_t* base) {
       g_ray.state = 1;  // submitted with the next Start
       return;
     }
-    if (hit && skate3::portal_gel::DropperMode()) skate3::portal_gel::PlaceDropper(g_ray.which, r, r + 8, g_gate_frame);
-    else if (hit) skate3::portal_gel::Paint(g_ray.which, r, r + 8, g_gate_frame);
+    if (hit) skate3::portal_gel::Paint(g_ray.which, r, r + 8, g_gate_frame);
     else REXLOG_INFO("portal-gel: GEL [f {}] shot hit nothing, no paint", g_gate_frame);
     return;
   }
@@ -701,76 +700,6 @@ void CollectCubeRay(PPCContext& ctx, uint8_t* base) {
     }
   }
   skate3::portal_cube::OnRay(g_cube_ray.want.kind, hit, r, r + 8);
-}
-
-// A gel blob's ray (droppers' streams, one per frame, round robin over the blobs), in the same Start/End batch as the gun and the cube.
-struct BlobRay {
-  std::atomic<int> state{0};  // 0 idle, 1 wanted, 2 submitted
-  uint32_t blob = 0;
-  float o[3] = {}, d[3] = {}, len = 0;
-  uint32_t handle = 0, mgr = 0, this_ptr = 0;
-  int age = 0;
-};
-BlobRay g_blob_ray;
-constexpr uint32_t kBlobScratch = 256;  // below the cube's (128) and the gun's (0) scratch
-
-void SubmitBlobRay(PPCContext& ctx, uint8_t* base, uint32_t self) {
-  uint32_t mgr = 0;
-  const uint32_t filter = g_start_filter;
-  if (!ReadBe32(base, self + 1908, &mgr) || !mgr || filter == 0xFFFFFFFFu) {
-    g_blob_ray.state = 0;
-    return;
-  }
-  const SavedRegs saved(ctx);
-  const uint32_t scratch = ((saved.r1 - 2048) & ~0xFu) - kBlobScratch;
-  const auto& w = g_blob_ray;
-  const float vecs[12] = {w.o[0], w.o[1], w.o[2], 1.0f, w.d[0] * w.len, w.d[1] * w.len, w.d[2] * w.len, 0.0f, 0, 0, 0, 0};
-  WriteBeFloats(base, scratch, vecs, 12);
-  ctx.r1.u32 = scratch - 256;
-  ctx.r3.u32 = mgr;
-  ctx.r4.u32 = scratch;
-  ctx.r5.u32 = scratch + 16;
-  ctx.r6.u32 = scratch + 32;
-  ctx.r7.u32 = filter;
-  sub_82E0B4E0(ctx, base);
-  g_blob_ray.handle = ctx.r3.u32;
-  saved.Restore(ctx);
-  g_blob_ray.mgr = mgr;
-  g_blob_ray.this_ptr = self;
-  g_blob_ray.state = 2;
-}
-
-void CollectBlobRay(PPCContext& ctx, uint8_t* base) {
-  const SavedRegs saved(ctx);
-  const uint32_t scratch = ((saved.r1 - 2048) & ~0xFu) - kBlobScratch;
-  uint32_t service = 0, vtable = 0, fn = 0, res = 0;
-  if (ReadBe32(base, g_blob_ray.mgr + 4, &service) && ReadBe32(base, service, &vtable) &&
-      ReadBe32(base, vtable + 32, &fn) && fn >= 0x82000000 && fn < 0x83000000) {
-    ctx.r1.u32 = scratch - 256;
-    ctx.r3.u32 = service;
-    ctx.r4.u32 = g_blob_ray.handle;
-    ctx.ctr.u32 = fn;
-    ctx.lr = 0;
-    t_gun_query = true;
-    REX_CALL_INDIRECT_FUNC(ctx.ctr.u32);
-    t_gun_query = false;
-    res = ctx.r3.u32;
-    saved.Restore(ctx);
-  }
-  g_blob_ray.state = 0;
-  float r[16] = {};
-  uint32_t raw[16];
-  const bool have = res >= 0x10000 && res < 0xC0000000 && skate3::native_scene::GuestTryCopy(raw, base + res, sizeof(raw));
-  if (have) {
-    for (int i = 0; i < 16; ++i) r[i] = BeFloat(raw[i]);
-  }
-  const bool hit = have && r[12] >= 0.0f && std::isfinite(r[0]) && std::isfinite(r[8]);
-  if (hit && r[8] * g_blob_ray.d[0] + r[9] * g_blob_ray.d[1] + r[10] * g_blob_ray.d[2] > 0.0f) {  // normal faces back along the ray
-    r[8] = -r[8];
-    r[9] = -r[9];
-    r[10] = -r[10];
-  }
-  skate3::portal_gel::OnBlobRay(g_blob_ray.blob, hit, r, r + 8);
 }
 
 constexpr uint32_t kLinRates = 0x140;
@@ -1827,21 +1756,6 @@ bool GateStep(PPCContext& ctx, uint8_t* base, uint32_t self) {
     gel_t = now_t;
     uint32_t gstate = 0;
     ReadBe32(base, self + 1336, &gstate);
-    {
-      // gel droppers: move the blobs, and queue one blob's ray for the next Start
-      skate3::portal_math::Frame pf[2];
-      const bool portals = skate3::portal_gate::PortalPairFrames(pf);
-      const float sg = g_air_gravity_n.load() >= 3 ? g_air_gravity.load() : 9.81f;
-      skate3::portal_gel::StreamStep(gdt, sg, portals ? pf : nullptr, g_gate_frame);
-      if (g_blob_ray.state == 0) {
-        if (skate3::portal_gel::NextBlobRay(&g_blob_ray.blob, g_blob_ray.o, g_blob_ray.d, &g_blob_ray.len)) {
-          g_blob_ray.age = 0;
-          g_blob_ray.state = 1;
-        }
-      } else if (++g_blob_ray.age > 30) {
-        g_blob_ray.state = 0;  // never reached Start/End: do not leave it stuck
-      }
-    }
     if (skate3::portal_gel::Count() > 0 && have && !(flags & kRelocateBit)) {
       static int logged_foot = 0;
       const float feet[3] = {p[0], p[1] - up_offset, p[2]};
@@ -3980,9 +3894,6 @@ extern "C" REX_FUNC(sub_82DB63C0) {
   if (g_cube_ray.state == 1) {
     SubmitCubeRay(ctx, base, self);
   }
-  if (g_blob_ray.state == 1) {
-    SubmitBlobRay(ctx, base, self);
-  }
 }
 
 extern "C" REX_FUNC(sub_82DB6580) {
@@ -3993,9 +3904,6 @@ extern "C" REX_FUNC(sub_82DB6580) {
   }
   if (g_cube_ray.state == 2 && self == g_cube_ray.this_ptr) {
     CollectCubeRay(ctx, base);
-  }
-  if (g_blob_ray.state == 2 && self == g_blob_ray.this_ptr) {
-    CollectBlobRay(ctx, base);
   }
 }
 

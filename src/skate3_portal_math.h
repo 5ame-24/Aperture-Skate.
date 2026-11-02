@@ -159,9 +159,5 @@ int GelPaint(GelPatch* list, int* n, int max, const GelPatch& p);
 // The splat's outline for drawing: `segments` (3..32) world points around the centre, `lift` metres in front of the surface, counter-clockwise
 // seen from the front, with a slightly uneven rim (radius 0.76..1.0 x) seeded by the patch id so it reads as paint, not a portal.
 int GelRing(const GelPatch& g, float lift, int segments, float out[][3]);
-// A flying gel blob (a dropper's stream, spec 002): one step of dt under `gravity` (m/s^2, down). With portal frames (`g` may be null), a step
-// that passes into an opening comes out of the other portal: position mapped, velocity turned, and at least `min_exit` m/s out of it (Portal 2:
-// paintblob_minimum_portal_exit_velocity 225 u/s = 5.7 m/s, so a slow stream still clears a floor exit). Returns the portal entered, or -1.
-int BlobAdvance(const Frame* g, float p[3], float v[3], float gravity, float dt, float min_exit);
 
 }  // namespace skate3::portal_math

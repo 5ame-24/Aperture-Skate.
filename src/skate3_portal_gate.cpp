@@ -1320,10 +1320,10 @@ void Overlay::OnDraw(ImGuiIO& io) {
                          ? "PORTAL GUN ON  (aim with the mouse: left click blue, right click orange, middle clear)"
                          : "PORTAL GUN ON  (hold D-pad down: right stick aims, RT blue, LT orange, Y clear, R1 grab, X cube; or Ctrl+1/2/3, Ctrl+G, Ctrl+5)");
   if (portal_gel::Mode()) {
-    ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f), "GEL MODE (%s): blue = bounce, orange = speed, clear removes gel (%d painted; Ctrl+H or D-pad down + B: "
-                       "paint -> dropper -> portals)", portal_gel::DropperMode() ? "DROPPER" : "paint", portal_gel::Count());
+    ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f), "GEL MODE: blue = bounce, orange = speed, clear removes gel (%d painted; Ctrl+H or D-pad down + B for portals)",
+                       portal_gel::Count());
   } else if (portal_gel::Enabled()) {
-    ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "Ctrl+H or D-pad down + B: gel mode (again: droppers, again: portals)");
+    ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "Ctrl+H or D-pad down + B: gel mode");
   }
   if (REXCVAR_GET(skate3_portal_gate_clock)) {
     // Wall-clock time to the millisecond, in the log's own (local) time, so a screenshot says which log lines it matches.
@@ -1408,29 +1408,6 @@ void Overlay::OnDraw(ImGuiIO& io) {
         for (int k = 0; k < kGelSeg; ++k) dl->AddTriangleFilled(cc, gp[k], gp[(k + 1) % kGelSeg], fill);
       }
       dl->AddPolyline(gp, kGelSeg, rim, ImDrawFlags_Closed, 3.0f);
-    }
-    // droppers (a dark nozzle with a ring in its colour) and the blobs in flight
-    float dp[8][3], bp[32][3];
-    int dk[8], bk[32];
-    const int nd = portal_gel::DropperSnapshot(dp, dk, 8), nb = portal_gel::BlobSnapshot(bp, bk, 32);
-    auto pixel_radius = [&](const float* q, float metres, ImVec2* at) {
-      const float up[3] = {q[0], q[1] + metres, q[2]};
-      ImVec2 b2;
-      if (!project(q, at) || !project(up, &b2)) return -1.0f;
-      return std::max(2.0f, std::hypot(b2.x - at->x, b2.y - at->y));
-    };
-    for (int i = 0; i < nd; ++i) {
-      ImVec2 at;
-      const float r = pixel_radius(dp[i], 0.35f, &at);
-      if (r < 0) continue;
-      dl->AddCircleFilled(at, r, IM_COL32(40, 40, 46, 230), 16);
-      dl->AddCircle(at, r, dk[i] ? IM_COL32(255, 106, 0, 255) : IM_COL32(0, 165, 255, 255), 16, 3.0f);
-    }
-    for (int i = 0; i < nb; ++i) {
-      ImVec2 at;
-      const float r = pixel_radius(bp[i], 0.12f, &at);
-      if (r < 0) continue;
-      dl->AddCircleFilled(at, r, bk[i] ? IM_COL32(255, 106, 0, 235) : IM_COL32(0, 165, 255, 235), 12);
     }
   }
   const bool world_surfaces = SurfaceDrawnRecently();
