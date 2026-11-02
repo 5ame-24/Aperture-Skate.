@@ -33,6 +33,7 @@
 
 #include "native/skate3_native_entity.h"
 #include "skate3_native_scene_state.h"
+#include "skate3_portal_autotest.h"
 #include "skate3_portal_chell.h"
 #include "skate3_portal_cube.h"
 #include "skate3_portal_gate.h"
@@ -2011,6 +2012,7 @@ struct CrossCheck {
   char kind[24] = {};
   float vin[3] = {}, vout[3] = {}, face[2] = {}, lat = 0, vert = 0, gravity = 9.81f;
   bool done10 = false;
+  bool steep = false;  // an upward launch (its result is the FLING line, not this)
 };
 CrossCheck g_check;
 int g_check_seq = 0;
@@ -2100,6 +2102,37 @@ void WalkScanStep(uint8_t* base, uint32_t self, const float v[3]) {
               g_walk_scan.scans, top(g_walk_scan.actor_hits, "actor"), top(g_walk_scan.skel_hits, "skeleton"));
 }
 
+// ---- AUTOTEST host (Ctrl+Shift+T): the sequencer in skate3_portal_autotest drives the game through this ----
+bool g_at_tp_pending = false;
+float g_at_tp_feet[3] = {}, g_at_tp_h[2] = {0, 1};
+bool g_at_crossed = false;
+struct AutotestHost : skate3::portal_autotest::Host {
+  void SetCvar(const std::string& n, const std::string& v) override { rex::cvar::SetFlagByName(n.c_str(), v.c_str()); }
+  std::string GetCvar(const std::string& n) override;
+  void ClearPortals() override { skate3::portal_gate::ClearNow(); }
+  void PlacePortal(int which, const float hit[3], const float normal[3], const float shot[3]) override {
+    skate3::portal_gate::PlaceOn(which, hit, normal, shot);
+  }
+  bool Teleport(const float feet[3], float hx, float hz) override {
+    std::copy(feet, feet + 3, g_at_tp_feet);
+    g_at_tp_h[0] = hx, g_at_tp_h[1] = hz;
+    g_at_tp_pending = true;  // GateStep arms it (it needs the update's stack)
+    return true;
+  }
+  void Log(const std::string& line) override { REXLOG_INFO("portal-probe: {}", line); }
+  void WriteFile(const std::string& name, const std::string& text) override {
+    std::ofstream(name, std::ios::trunc) << text;
+  }
+} g_at_host;
+std::string AutotestHost::GetCvar(const std::string& n) {
+  if (n == "skate3_portal_gate_fit") return skate3::portal_gate::FitEnabled() ? "true" : "false";
+  if (n == "skate3_portal_fling_mode") return skate3::portal_gate::FlingModeName(skate3::portal_gate::FlingMode());
+  if (n == "skate3_portal_carry_position_s") return std::to_string(REXCVAR_GET(skate3_portal_carry_position_s));
+  if (n == "skate3_portal_carry_short") return std::to_string(REXCVAR_GET(skate3_portal_carry_short));
+  if (n == "skate3_portal_fling") return REXCVAR_GET(skate3_portal_fling) ? "true" : "false";
+  return "";
+}
+
 float g_last_heading[2] = {0, 0};  // the skater's last horizontal travel direction with real speed (> 1 m/s), for vertical exits
 // FACING: which axis of the skater's presentation matrix is "forward" (learned while riding fast), so a crossing turns the real facing
 // through the pair (entering fakie or at an angle comes out the same way relative to the exit portal), not the travel direction.
@@ -2153,6 +2186,39 @@ bool GateStep(PPCContext& ctx, uint8_t* base, uint32_t self) {
     return false;
   }
   const float place_pos[3] = {ground[0], ground[1] + up_offset, ground[2]};
+  // AUTOTEST: start / stop from the key, step the sequencer, and arm its teleports (a drop from a set height above the entry portal)
+  if (skate3::portal_gate::TakeAutotest()) {
+    if (skate3::portal_autotest::Running()) {
+      skate3::portal_autotest::Stop(g_at_host, "stopped by the key");
+    } else if (riding) {
+      const float hd[2] = {g_last_heading[0], g_last_heading[1]};
+      skate3::portal_autotest::Start(g_at_host, ground, hd);
+    } else {
+      REXLOG_INFO("portal-probe: AUTOTEST needs you riding on flat open ground to start");
+    }
+  }
+  if (skate3::portal_autotest::Running()) {
+    skate3::portal_autotest::Step(g_at_host, double(std::chrono::steady_clock::now().time_since_epoch().count()) * 1e-9, g_at_crossed);
+    g_at_crossed = false;
+    if (g_at_tp_pending && !(flags & kRelocateBit)) {
+      const float hx = g_at_tp_h[0], hz = g_at_tp_h[1];
+      const float target[16] = {hz, 0, -hx, 0, 0, 1, 0, 0, hx, 0, hz, 0, g_at_tp_feet[0], g_at_tp_feet[1], g_at_tp_feet[2], 1};
+      g_fling.left = 0;  // a test drop is not a fling exit
+      if (ArmTeleport(base, sp, self, flags, target)) {
+        g_at_tp_pending = false;
+        // tracking follows the drop (a relocation of up to 10 m would read as a glitch otherwise)
+        const float c[3] = {g_at_tp_feet[0], g_at_tp_feet[1] + up_offset, g_at_tp_feet[2]};
+        std::copy(c, c + 3, tracked);
+        std::copy(c, c + 3, last);
+        std::copy(c, c + 3, g_track_exit);
+        g_track_since_cross = 0;
+        g_fling_steep_exit = false;
+        return true;
+      }
+    }
+  } else {
+    g_at_tp_pending = false;
+  }
   {
     // first person looks from the rider, not the board
     float head[3];
@@ -2311,6 +2377,12 @@ bool GateStep(PPCContext& ctx, uint8_t* base, uint32_t self) {
               kept = ex > 0.5f ? 100.0f * sp / ex : 100.0f;
             }
             ScoreCrossing(g_check.kind, kept, hv >= 1.0f ? h_err : -1.0f);
+            if (!g_check.steep) {
+              skate3::portal_autotest::Result ar;
+              ar.kept = kept;
+              ar.heading = hv >= 1.0f ? h_err : -1.0f;
+              skate3::portal_autotest::Report(ar);
+            }
           }
           g_check.done10 = true;
         }
@@ -2809,6 +2881,7 @@ bool GateStep(PPCContext& ctx, uint8_t* base, uint32_t self) {
   const float target[16] = {hz, 0, -hx, 0, 0, 1, 0, 0, hx, 0, hz, 0, cross.exit_pos[0], feet_y, cross.exit_pos[2], 1};
   const bool ok = ArmTeleport(base, sp, self, flags, target);
   if (ok) g_last_cross_ns = std::chrono::steady_clock::now().time_since_epoch().count();
+  if (ok) g_at_crossed = true;
   {
     // one line per crossing (run 210: 146 crossings, 1 FLING line): the entry, and what FLING decided
     const float v_in_sp = std::sqrt(v_entry[0] * v_entry[0] + v_entry[1] * v_entry[1] + v_entry[2] * v_entry[2]);
@@ -2867,6 +2940,7 @@ bool GateStep(PPCContext& ctx, uint8_t* base, uint32_t self) {
     g_check.lat = cross.exit_lat;
     g_check.vert = cross.exit_vert;
     g_check.gravity = g_air_gravity_n.load() >= 3 ? g_air_gravity.load() : 9.81f;
+    g_check.steep = g_fling_steep_exit;
     REXLOG_INFO("portal-probe: CROSSCHECK #{} [f {}] {} {}: in ({:.1f}, {:.1f}, {:.1f}) {:.1f} m/s -> out ({:.1f}, {:.1f}, {:.1f}), facing ({:.2f}, "
                 "{:.2f}), came out {:.2f} m across / {:.2f} m up from the exit centre", g_check.seq, g_gate_frame, g_check.kind, riding ? "rolling" : "airborne",
                 vin[0], vin[1], vin[2], std::sqrt(vin[0] * vin[0] + vin[1] * vin[1] + vin[2] * vin[2]), vout[0], vout[1], vout[2], hx, hz,
@@ -3503,6 +3577,13 @@ extern "C" REX_FUNC(sub_82DB88C8) {
       // Portal's rule (spec 001): the exit keeps the entry speed along the exit, no clamp: a floor-floor drop of h comes back up h
       const float portal_rise = vy > 0 ? vy * vy / (2.0f * g) : 0.0f;
       const float rose = g_fexit.peak - g_fexit.y0;
+      {
+        skate3::portal_autotest::Result ar;
+        ar.launch = true;
+        ar.rule_rise = vy > 0 ? vy * vy / (2.0f * g) : 0.0f;
+        ar.rose = rose;
+        skate3::portal_autotest::Report(ar);
+      }
       REXLOG_INFO("portal-probe: FLING #{} [{}]: fell in at {:.1f} m/s, out at {:.1f} m/s up; Portal rule: rise {:.1f} m; rose {:.2f} m, top upward speed "
                   "{:.1f} m/s{} - {}", g_fexit.seq, skate3::portal_gate::FlingModeName(g_fexit.mode), g_fexit.fall_in, vy, portal_rise, rose,
                   g_fexit.vy_max, g_fexit.mode == 4 ? [&] {

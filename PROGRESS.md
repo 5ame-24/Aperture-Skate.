@@ -925,3 +925,11 @@ Actor offsets: +1200/+1216 ground pos, +1232 delta, +1248 velocity, +1296 flags,
     - "fell in at 0.0" with "out at 9 m/s up" is a rolling wall->floor launch (no fall; the speed comes from rolling in), a real launch.
     - One `EXIT [f N] wall->floor: v_out (...) S m/s; board points (...) from the velocity / fakie / facing / last heading; carried T s` line
       per crossing replaces the facing lines.
+83. AUTOTEST (Ctrl+Shift+T; built, untested): automated, scored trials of the mechanics, no human drops. src/skate3_portal_autotest.{h,cpp}
+    (pure sequencer, tests/skate3_portal_autotest_test.cpp with a fake host). From where you ride (flat open ground): portal A on the
+    floor 6 m ahead, portal B 16 m ahead (a floor for upward launches, or a wall portal standing on the ground facing sideways); the skater is
+    teleported 2 / 4 / 7 / 10 m (floor->floor) and 3 / 7 m (floor->wall) above A and falls in; the result is the FLING result line (launch:
+    rose vs the Portal rule's rise) or CROSSCHECK +20 (horizontal exit: kept %, heading error); portals cleared between trials (a
+    floor-floor pair would loop). Repeated under 3 carry settings (default / no arc move / 0.5 s arc + 0.8 s short); fitting off while it
+    runs; every cvar restored at the end. Output: `AUTOTEST trial k/N [...] ...` lines, one summary line per setting with a score, `best:`,
+    and skate3_portal_autotest.json (every trial) in the run folder. The overlay shows the running trial; Ctrl+Shift+T again stops it.

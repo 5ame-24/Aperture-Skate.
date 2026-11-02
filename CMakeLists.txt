@@ -261,6 +261,7 @@ set(SKATE3_COMMON_SOURCES
     src/skate3_portal_camera.cpp
     src/skate3_portal_gel.cpp
     src/skate3_portal_retarget.cpp
+    src/skate3_portal_autotest.cpp
     src/skate3_portal_probe.cpp
     src/skate3_portal_gate.cpp
     src/skate3_portal_cube.cpp

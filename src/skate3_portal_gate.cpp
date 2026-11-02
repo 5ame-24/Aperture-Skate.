@@ -1,5 +1,6 @@
 #include "skate3_portal_cube.h"
 #include "skate3_portal_gate.h"
+#include "skate3_portal_autotest.h"
 #include "skate3_portal_chell.h"
 #include "skate3_portal_gel.h"
 #include "skate3_portal_math.h"
@@ -681,6 +682,22 @@ void AimNdc(float* x, float* y) {
     *y = g_pad_y.load();
   }
 }
+
+void ClearNow() {
+  std::lock_guard<std::mutex> lock(g_mutex);
+  g_gates[0].active = g_gates[1].active = false;
+  g_have_prev = false;
+  g_both_placed = false;
+}
+bool FitEnabled() { return REXCVAR_GET(skate3_portal_gate_fit); }
+std::atomic<bool> g_autotest_req{false};
+void RequestAutotest() {
+  static std::atomic<int64_t> last{0};
+  if (now_ns() - last.load() < 500'000'000) return;
+  last = now_ns();
+  g_autotest_req = true;
+}
+bool TakeAutotest() { return g_autotest_req.exchange(false); }
 
 std::atomic<bool> g_on_foot{false};  // FPVWALK: the skater is on foot (state 500), set by the probe
 std::atomic<int64_t> g_fizzle_ns{0};
@@ -1582,7 +1599,8 @@ void Overlay::OnDraw(ImGuiIO& io) {
                      REXCVAR_GET(skate3_portal_gate_mouse)
                          ? "PORTAL GUN ON  (aim with the mouse: left click blue, right click orange, middle clear)"
                          : "PORTAL GUN ON  (hold D-pad down: right stick aims, RT blue, LT orange, Y clear, R1 grab, X cube; or Ctrl+1/2/3, Ctrl+G, Ctrl+5)");
-  ImGui::TextColored(ImVec4(0.6f, 0.8f, 1.0f, 1.0f), "fling: %s (Ctrl+F)", FlingModeName(FlingMode()));
+  ImGui::TextColored(ImVec4(0.6f, 0.8f, 1.0f, 1.0f), "fling: %s (Ctrl+F)  |  Ctrl+Shift+T: AUTOTEST", FlingModeName(FlingMode()));
+  if (const std::string at = portal_autotest::Status(); !at.empty()) ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.2f, 1.0f), "%s", at.c_str());
   if (portal_gel::Mode()) {
     ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f), "GEL MODE: blue = bounce, orange = speed, clear removes gel (%d painted; Ctrl+H or D-pad down + B for portals)",
                        portal_gel::Count());

@@ -43,7 +43,7 @@ for line in open(path, errors="replace"):
                 "never left the ground", "on orange", "left orange", "GEL prop", "GEL skipped: on foot", "shot went into the", "GEL drawn in the world", "AIR loaded", "AIR no saved", "CHAR you:", "CHAR co-op", "follows the NPC", "own skeleton", "no skeleton in the cache",
                 "skeleton now draws", "CHAR slot", "reset (", "CHARSEL",
                 "lift armed", "lift done", "lift skipped", "lift refused", "boost: cached speed", ": held", "overwritten", "riding: lift", "capped", "set to", "(panel)", "building (", "GEL mode ON", "pointer pass", " place ", "candidate text IDs", "hold one of its text IDs", "LOOKS LIKE A LIST", "started from the key", "PORTALFIT", "fits", "best effort", "does not fit", "pushed",
-                "crossing: wall exit lifted", "CONSISTENCY", "converged", "EXIT [f", "from the velocity, fakie", "FLING #", "FLEW", "NOT FLYING", "partly", "FLING mode now", "FACING", "exit facing from your facing", "exit heading from your last heading", "CROSSCHECK", "exit facing from the velocity", "FACING [f", "locked:", "CHARSEL dump", "portal size now", "removed (skate3_portal_gate_fit_strict)", "FPVWALK", "WALK on-foot velocity carriers", "decision: ARMED", "decision: not armed", "floor exit flung up", "on foot +", "FPVWALK input"):
+                "crossing: wall exit lifted", "CONSISTENCY", "converged", "AUTOTEST", "EXIT [f", "from the velocity, fakie", "FLING #", "FLEW", "NOT FLYING", "partly", "FLING mode now", "FACING", "exit facing from your facing", "exit heading from your last heading", "CROSSCHECK", "exit facing from the velocity", "FACING [f", "locked:", "CHARSEL dump", "portal size now", "removed (skate3_portal_gate_fit_strict)", "FPVWALK", "WALK on-foot velocity carriers", "decision: ARMED", "decision: not armed", "floor exit flung up", "on foot +", "FPVWALK input"):
         if tag in line:
             other[tag] += 1
     if "PCAM" in line:
@@ -77,6 +77,9 @@ for l in open(path, errors="replace"):
         print(" ", l.split("portal-", 1)[-1].strip()[:220])
 for l in open(path, errors="replace"):
     if "CHARSEL" in l and ("places in guest memory" in l or "looks like a table" in l or "LOOKS LIKE A LIST" in l or "text IDs" in l):
+        print(" ", l.split("portal-probe: ", 1)[-1].strip()[:240])
+for l in open(path, errors="replace"):
+    if "AUTOTEST" in l and ("trial" in l or "best:" in l or ": launches" in l or "done" in l):
         print(" ", l.split("portal-probe: ", 1)[-1].strip()[:240])
 for b in boosts:
     print(f"  orange ride {b[0]:.2f} s: in {b[1]:.1f}, peak {b[2]:.1f}, out {b[3]:.1f} m/s")

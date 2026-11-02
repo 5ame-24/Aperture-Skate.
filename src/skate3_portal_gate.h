@@ -55,6 +55,11 @@ void SetGameFrame(unsigned frame);
 void FilterPad(uint16_t* buttons, uint8_t* left_trigger, uint8_t* right_trigger, int16_t* rx, int16_t* ry, int16_t* lx = nullptr, int16_t* ly = nullptr);
 // FPVWALK: the probe says whether the skater is on foot (state 500); the walking direction the stick asked for last (world, unit; false = none).
 void SetOnFoot(bool on_foot);
+// AUTOTEST: clear both portals at once (no sound, no debounce, gel untouched); is portal fitting on.
+void ClearNow();
+bool FitEnabled();
+void RequestAutotest();  // Ctrl+Shift+T: start / stop AUTOTEST (taken on the game thread)
+bool TakeAutotest();
 // Fling exits: how they get airborne (skate3_portal_fling_mode: 0 ollie, 1 air, 2 lift, 3 release, 4 carry; Ctrl+F cycles) and the played ollie.
 int FlingMode();
 const char* FlingModeName(int m);
