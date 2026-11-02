@@ -39,3 +39,11 @@ Needed by: the FLING assist (PROGRESS 55) assumes 9.81 m/s^2 and treats the boar
 Answers it: the gravity the skater's air controller integrates (m/s^2), and which state holds the airborne velocity the game integrates
 (board rates, skeleton +0x2770.. vectors, or an air-controller field), so the exit velocity can be set once in the right place instead of
 being topped up for N frames.
+
+## R6. "Backwards man" speed glitch as a macro  (open, research)
+Needed by: a player-triggered speed macro that the portal crossings could mimic. Seen in run 187 (00:20:40, "speed glitch exit,
+felt like max velocity"): one crossing logged 548.9 m/s before settling near 37-39 m/s.
+Answers it: the real Skate 3 "backwards man" trick, reproduced by input or by state, in game-facing terms: which inputs and states
+(riding, air, off-board, landing) trigger it, which velocity or board fields it writes and in what units, and whether it can be
+triggered on purpose and repeated. Then: is the 548.9 m/s spike from the same mechanism, or from our teleport writing the board
+rates (`boardV` / `actorV` in the TRACE lines)?
