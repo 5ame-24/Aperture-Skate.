@@ -151,23 +151,30 @@ def parse_model(mdl, vvd, vtx, lod=0):
     skin0 = [u16(mdl, skin_idx + 2 * i) for i in range(nref)]
     nbp, bp_idx = u32(mdl, 232), u32(mdl, 236)
 
-    # vertices (LOD 0, fixups applied)
-    nfix, fix_start, vdata = u32(vvd, 48), u32(vvd, 52), u32(vvd, 56)
-    nlod0 = u32(vvd, 16 + 4 * lod)
+    # Vertices. The VVD holds every vertex once. Without a fixup table every LOD indexes that one array with the LOD-0 offsets (mesh
+    # vertexoffset + model vertexindex). With fixups, LOD L's own array is the fixup ranges with lod >= L laid end to end, mesh after mesh:
+    # a mesh then starts at the sum of the earlier meshes' LOD-L vertex counts (mstudiomesh_t numLODVertexes[L], at +52), not at its LOD-0
+    # offset. (The old code loaded only numLODVertexes[L] vertices and used LOD-0 offsets: index out of range on ballbot at LOD 2.)
+    nlods = max(1, u32(vvd, 12))
+    lod = min(lod, nlods - 1)
+    nfix, fix_start, vdata, tdata = u32(vvd, 48), u32(vvd, 52), u32(vvd, 56), u32(vvd, 60)
     def vert(i):
         o = vdata + 48 * i
         # position(3) normal(3) uv(2), then the skin: weights(3), bones(3), bone count (studio vertex: weights at +0, bones at +12, count +15)
         w = struct.unpack_from('<3f', vvd, o)
         b = struct.unpack_from('<3B', vvd, o + 12)
         return struct.unpack_from('<8f', vvd, o + 16) + (b, vvd[o + 15], w)
-    lod0 = []
     if nfix == 0:
-        lod0 = [vert(i) for i in range(nlod0)]
+        nall = (tdata - vdata) // 48 if tdata > vdata else u32(vvd, 16)
+        lodv = [vert(i) for i in range(nall)]
     else:
+        lodv = []
         for k in range(nfix):
             lod_f, src, n = struct.unpack_from('<iii', vvd, fix_start + 12 * k)
             if lod_f >= lod:
-                lod0.extend(vert(src + j) for j in range(n))
+                lodv.extend(vert(src + j) for j in range(n))
+    print('vertices: %d LODs, using LOD %d, %d fixups, %d vertices in its array' % (nlods, lod, nfix, len(lodv)))
+    cum = 0  # (fixups) where the next mesh starts in lodv
 
     meshes = []  # (material_name_candidates, [vertex tuples])
     # VTX
@@ -184,9 +191,15 @@ def parse_model(mdl, vvd, vtx, lod=0):
             vlod_n, vlod_off = u32(vtx, vm), u32(vtx, vm + 4)
             lod_h = vm + vlod_off + 12 * min(lod, vlod_n - 1)  # the chosen LOD's header
             vnmesh, vmesh_off = u32(vtx, lod_h), u32(vtx, lod_h + 4)
-            for k in range(min(nmesh, vnmesh)):
+            for k in range(nmesh):
+                if k >= vnmesh:
+                    if nfix:
+                        cum += u32(mdl, mo + mesh_idx + 116 * k + 52 + 4 * lod)
+                    continue
                 me = mo + mesh_idx + 116 * k
                 material, vert_off = u32(mdl, me), u32(mdl, me + 12)
+                mesh_base = cum if nfix else vert_byte // 48 + vert_off
+                mesh_n = u32(mdl, me + 52 + 4 * lod) if nfix else u32(mdl, me + 8)
                 vh = lod_h + vmesh_off + 9 * k
                 nsg, sg_off = u32(vtx, vh), u32(vtx, vh + 4)
                 tris = []
@@ -204,8 +217,13 @@ def parse_model(mdl, vvd, vtx, lod=0):
                         raise ValueError('strip group layout not recognised')
                     orig = [u16(vtx, sg + vo + 9 * v + 4) for v in range(nv)]
                     for i in idx:
-                        gi = vert_byte // 48 + vert_off + orig[i]
-                        tris.append(lod0[gi])
+                        gi = mesh_base + orig[i]
+                        if orig[i] >= mesh_n or gi >= len(lodv):
+                            raise ValueError('body part %d model %d mesh %d: vertex %d of %d (array %d, base %d, LOD %d, fixups %d)' % (
+                                bp, m, k, orig[i], mesh_n, len(lodv), mesh_base, lod, nfix))
+                        tris.append(lodv[gi])
+                if nfix:
+                    cum += mesh_n
                 if tris:
                     mat = tex_names[skin0[material]] if material < len(skin0) and skin0[material] < len(tex_names) else None
                     meshes.append((mat, cd_dirs, tris))
@@ -238,6 +256,46 @@ def parse_bones(mdl):
     return out
 
 
+def up_axis(meshes):
+    """1 (y) or 2 (z): the vertical axis of a standing character. Character models stand on their origin, so the up axis is the one whose
+    minimum is near 0 and whose extent is the largest (Chell: y 0..76.6, z -8..13.8). Printed, so a wrong guess shows."""
+    lo, hi = [1e30] * 3, [-1e30] * 3
+    for _, _, t in meshes:
+        for v in t:
+            for a in range(3):
+                lo[a] = min(lo[a], v[a]); hi[a] = max(hi[a], v[a])
+    def score(a):
+        ext = hi[a] - lo[a]
+        return ext * (1.0 if abs(lo[a]) < 0.1 * ext else 0.5)
+    up = 1 if score(1) >= score(2) else 2
+    print('bounds x %.1f..%.1f  y %.1f..%.1f  z %.1f..%.1f -> up axis %s' % (lo[0], hi[0], lo[1], hi[1], lo[2], hi[2], 'y' if up == 1 else 'z'))
+    return up
+
+
+def to_y_up(meshes, bones):
+    """Character caches are always y-up (the game side puts y up). A z-up model is turned -90 degrees about x: (x, y, z) -> (x, z, -y),
+    positions, normals and bone matrices alike (a rotation, so handedness and the skin are kept)."""
+    if up_axis(meshes) == 1:
+        return meshes, bones
+    def q(x, y, z):
+        return x, z, -y
+    out = []
+    for m, cd, t in meshes:
+        nt = []
+        for v in t:
+            p, n = q(*v[0:3]), q(*v[3:6])
+            nt.append(p + n + tuple(v[6:]))
+        out.append((m, cd, nt))
+    nb = []
+    for name, parent, r in bones:
+        rows = [r[0:4], r[4:8], r[8:12]]
+        # Q * [R | t]: row 0 stays, new row 1 = old row 2, new row 2 = -old row 1
+        rr = rows[0] + rows[2] + [-x for x in rows[1]]
+        nb.append((name, parent, rr))
+    print('turned to y-up (was z-up)')
+    return out, nb
+
+
 CHARACTERS = {'chell': ('models/player/chell/', 'player'), 'atlas': ('models/player/ballbot/', 'ballbot'),
               'pbody': ('models/player/eggbot/', 'eggbot')}
 
@@ -260,12 +318,14 @@ def png_write(path, w, h, rgb):
                            chunk(b'IDAT', zlib.compress(raw, 6)) + chunk(b'IEND', b''))
 
 
-def preview(prefix, meshes, textures, size=360):
+def preview(prefix, meshes, textures, size=360, y_up=False):
     xs = [v[0] for _, _, t in meshes for v in t]; ys = [v[1] for _, _, t in meshes for v in t]; zs = [v[2] for _, _, t in meshes for v in t]
     print('bounds x %.1f..%.1f  y %.1f..%.1f  z %.1f..%.1f' % (min(xs), max(xs), min(ys), max(ys), min(zs), max(zs)))
     c = [(min(a) + max(a)) / 2 for a in (xs, ys, zs)]
     ext = max(max(a) - min(a) for a in (xs, ys, zs)) or 1
-    for name, (ax, ay) in {'side': (0, 2), 'top': (0, 1), 'front': (1, 2)}.items():
+    # (horizontal, vertical) axes per view: the gun is Source z-up; the character caches are y-up (normalised in extract)
+    views = {'front': (0, 1), 'side': (2, 1), 'top': (0, 2)} if y_up else {'side': (0, 2), 'top': (0, 1), 'front': (1, 2)}
+    for name, (ax, ay) in views.items():
         depth_ax = ({0, 1, 2} - {ax, ay}).pop()
         img = bytearray([24, 24, 32] * size * size)
         zb = [-1e9] * (size * size)
@@ -361,9 +421,11 @@ def extract(vpk, base, out, prev, skip_default, lod, with_bones):
     skip = tuple(x for x in skip_env.split(',') if x)
     keep = [(m, cd, t) for m, cd, t in meshes if not (m and any(sk in m for sk in skip))]
     print('kept meshes:', [(m, len(t) // 3) for m, _, t in keep])
-    if prev:
-        preview(prev, keep, textures)
     bones = parse_bones(mdl) if with_bones else None
+    if with_bones:
+        keep, bones = to_y_up(keep, bones)
+    if prev:
+        preview(prev, keep, textures, y_up=with_bones)
     if bones:
         print('bones:', len(bones), [b[0] for b in bones[:12]], '...')
         used = {bi for _, _, t in keep for v in t for bi, k in zip(v[8], range(v[9]))}

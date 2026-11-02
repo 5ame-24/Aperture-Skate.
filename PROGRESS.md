@@ -696,3 +696,18 @@ Actor offsets: +1200/+1216 ground pos, +1232 delta, +1248 velocity, +1296 flags,
     - Logs: `CHAR you: atlas (N bones, own skeleton)`, `CHAR slot s (name): own skeleton N bones, M mapped ... onto K skater bones, T bones
       turned (largest X deg), gap a -> b m, built in Y ms`, one `bone i NAME -> skater part P bone B` line per bone, `follows the NPC`.
     - Not done / spec request R10: listing them in the game's own character select (needs Skate's character data); exact bone names.
+63. Run of HANDOFF 8 STEP 0 -> extractor fixes, character-select groundwork (built, untested).
+    - Atlas failed (`lod0[gi]` out of range). Cause (studio format): without fixups every LOD indexes the ONE vertex array with LOD-0
+      offsets, but only numLODVertexes[LOD] vertices were loaded; with fixups, LOD L's array is the fixup ranges (lod >= L) end to end and a
+      mesh starts at the sum of earlier meshes' numLODVertexes[L] (mstudiomesh_t +52), not its LOD-0 offset. parse_model now does both
+      (all vertices up to the tangent block when there are no fixups; per-LOD running offsets with fixups, counting skipped meshes too) and
+      raises a clear error with body part / model / mesh / counts instead of an IndexError. Prints "vertices: N LODs, using LOD L, F fixups".
+    - Chell "lying flat": the data is y-up (y 0..76.6) but the preview drew it with the gun's z-up axes. Character caches are now always
+      y-up: up_axis() (the axis starting near 0 with the largest extent; printed) and to_y_up() (a z-up model turns -90 deg about x:
+      positions, normals and bone matrices); the preview draws front (x, y), side (z, y), top (x, z) for characters. In game nothing changed
+      for Chell (Build already treats y as up); a z-up Atlas / P-body now stands too.
+    - Character select: the game's own list is guest code (spec request R11). CHARSEL probe (Ctrl+Shift+9, read only, background thread):
+      finds the names in skate3_portal_charsel_names ("Shingo") in guest memory (ASCII and UTF-16BE), the pointers to each, the 32 words
+      around each pointer, and the table stride where neighbours also point at names. Ctrl+0 / Ctrl+Shift+0 unchanged.
+    - SDK changes needed (not done, third_party/rexglue-sdk): an Esc-menu row "Portal character: Off / Chell / Atlas / P-body" bound to
+      skate3_portal_chell + skate3_portal_character (same cvars Ctrl+0 sets), next to "Portal First-Person View Follows".

@@ -25,6 +25,9 @@ int SlotCharacter(int s);  // portal_gun::Character, or -1
 const portal_gun::Model* SlotModel(int s);
 void Toggle();      // Ctrl+0: your character
 void ToggleCoop();  // Ctrl+Shift+0: the two co-op slots on the nearest NPCs
+// Ctrl+Shift+9: one read-only scan of guest memory for the game's own character-select names (CHARSEL lines, spec request R11).
+void RequestSelectorProbe();
+bool TakeSelectorProbe();
 
 // Render thread: where the slot's skater is this frame (you: the tracked point; co-op: the NPC character it follows). False = nobody (yet).
 bool SlotTarget(int s, float out[3]);

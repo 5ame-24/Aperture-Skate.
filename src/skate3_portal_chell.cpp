@@ -168,6 +168,13 @@ void ToggleCoop() {
               portal_gun::GetCharacter(CoopCharacter(1)) ? "cache found" : "NO CACHE");
 }
 
+std::atomic<bool> g_selector_probe{false};
+void RequestSelectorProbe() {
+  g_selector_probe = true;
+  REXLOG_INFO("portal-chell: CHARSEL scan requested (runs on the next skater update, in the background)");
+}
+bool TakeSelectorProbe() { return g_selector_probe.exchange(false); }
+
 bool SlotTarget(int s, float out[3]) {
   if (!SlotActive(s)) return false;
   Sync(s);
