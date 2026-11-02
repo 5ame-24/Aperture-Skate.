@@ -80,3 +80,11 @@ Do not add features beyond these. Keep unit tests passing (tests/run.sh once it 
 - One HANDOFF per round keeps each test attributable to one change.
 - Log tags are the contract between the two Claudes: cloud Claude decides what to log, local Claude greps for it.
 - The human's notes are kept verbatim because clock-time and visual oddities are often the first clue.
+
+## One feature per round, no flags to remember
+
+- Each HANDOFF polishes and tests ONE feature. That feature is on by default in its test command; cloud does not add a
+  `--skate3_portal_*` flag for it. Other features stay off unless the round is about them.
+- The test command for each round is the same `./skate3 --game_data_root=... --fullscreen=false --skate3_portal_gate=true` line,
+  with no extra flags, unless the HANDOFF says otherwise.
+- Reason: runs with the wrong flag give "not working" results that are really missing features (run 192: fling off, FLING armed 0).
