@@ -860,3 +860,16 @@ Actor offsets: +1200/+1216 ground pos, +1232 delta, +1248 velocity, +1296 flags,
     - Exits: the wall-exit lift now also applies to on-foot entries; any outward motion out of a floor exit starts airborne (was > 1.5 m/s).
     - Scorecard every 5 crossings: `CONSISTENCY after N crossings (last 20 per kind): wall->wall: n, kept K% +- S, heading off H deg; ...`
       (kept = horizontal speed vs the promise for mostly horizontal exits; vs the ballistic speed for steep ones, so gravity is not counted).
+76. Run 211 ("no flings"): FLING armed 82 times and topped the board rates up to 13 m/s every frame, but the next frame read them back at
+    -5.7 / -7.5 m/s, state 100, flags C0000000 (riding): the game rewrites them each frame. A teleport always ends in riding (100) or
+    bailed (500) (skeleton +10768 bit 0), and we force that on-board byte for 12 frames after every crossing so it ends in 100; riding
+    then snaps the board to the ground and drops the upward speed. Built (untested):
+    - skate3_portal_fling_release_onboard (on): for a steep exit (|v_out.y| > half the speed, or out of a floor upward) the byte is forced
+      only while the Teleporting state (700/702) lasts, then released (`GATE on-board forcing released after the teleport (state S): a fling
+      exit may go airborne`), so the game can switch to the air state. Wall exits keep the 12 frames (unchanged).
+    - FLINGTRACE for the first 6 flings (then every 10th), 12 frames each: height relative to the crossing, state, flags, and every store as
+      READ before that frame's top-up (board rates mean, actor +1248, AIR's skeleton carriers), along-the-exit vs expected; and a result line
+      `FLINGTRACE #n result: height +X m after T s (a free flight at v_out would be +Y m)` with "NOT FLYING" when under 30%.
+    - The 59.7 vs 13.2 m/s "mismatch" in run 211 was two different crossings (16:11:59 a 13 m/s drop; 16:15:49 a floor-floor fall loop that
+      had built up to ~60 m/s, where the smoothed estimate lags: 45). The CONSISTENCY entry line now names its crossing # and says the
+      estimate is smoothed.
