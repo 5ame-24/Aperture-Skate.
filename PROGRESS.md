@@ -641,3 +641,12 @@ Actor offsets: +1200/+1216 ground pos, +1232 delta, +1248 velocity, +1296 flags,
     - FLING bailed at +1: it was an on-foot crossing (state 500, walking-pace v_in); FLING now does not arm off the board
       (`FLING not armed: crossing off the board`). On-foot velocity: spec request R9.
 
+60. Run 196 feedback (docs/handoff-feedback-5.md) -> FPVTRACK lock stops flipping, frame stamps (built, untested).
+    - Run 196: the lock took the right entity (491AE6C0, 0.28 m), then was dropped and re-taken 12 times, each after a 5-9 m one-frame jump
+      of that same entity while the skater stood still. The right entity makes one-frame jumps; they are not a wrong lock.
+    - PublishCharacters: a jump is only counted and logged (`FPVTRACK [f N] locked entity E moved X m in one frame ... (lock kept, K such
+      jumps)`). The lock is dropped only when the skater's own riding position disagrees: entity > 3 m from it (or unreadable) for 60 riding
+      frames in a row (`... unlocked: X m from the riding position for 60 riding frames`). A new lock is only taken while unlocked.
+    - Re-acquire, jump guard and AIR unchanged (AIR worked: 24 clean arcs, g median 8.07 m/s^2, carrier skeleton+0x28E0 in 20 of 24).
+    - `[f N]` (the human's GateStep update count) on every FPVTRACK and FLING line, drawn in yellow under the on-screen clock (top right,
+      skate3_portal_gate_clock, on by default): a screenshot or phone video matches log lines. leaplog.py strips the stamp.
