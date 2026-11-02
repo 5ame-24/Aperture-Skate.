@@ -43,7 +43,7 @@ for line in open(path, errors="replace"):
                 "never left the ground", "on orange", "left orange", "GEL prop", "GEL skipped: on foot", "shot went into the", "GEL drawn in the world", "AIR loaded", "AIR no saved", "CHAR you:", "CHAR co-op", "follows the NPC", "own skeleton", "no skeleton in the cache",
                 "skeleton now draws", "CHAR slot", "reset (", "CHARSEL",
                 "lift armed", "lift done", "lift skipped", "lift refused", "boost: cached speed", ": held", "overwritten", "riding: lift", "capped", "dropper placed", "gun sub-mode", "went through the", "blob paint #", "droppers cleared", "set to", "(panel)", "building (", "GEL key Ctrl+Shift+H", "blob ray", "GEL mode ON", "DROPPER", "pointer pass", " place ", "candidate text IDs", "hold one of its text IDs", "LOOKS LIKE A LIST", "started from the key", "PORTALFIT", "fits", "best effort", "does not fit", "pushed",
-                "rolling crossing: wall exit lifted", "FACING", "exit facing from your facing", "exit heading from your last heading", "CROSSCHECK", "exit facing from the velocity", "FACING [f", "locked:", "CHARSEL dump", "portal size now", "removed (skate3_portal_gate_fit_strict)", "FPVWALK", "WALK on-foot velocity carriers"):
+                "rolling crossing: wall exit lifted", "FACING", "exit facing from your facing", "exit heading from your last heading", "CROSSCHECK", "exit facing from the velocity", "FACING [f", "locked:", "CHARSEL dump", "portal size now", "removed (skate3_portal_gate_fit_strict)", "FPVWALK", "WALK on-foot velocity carriers", "decision: ARMED", "decision: not armed", "floor exit flung up", "on foot +", "FPVWALK input"):
         if tag in line:
             other[tag] += 1
     if "PCAM" in line:

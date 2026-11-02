@@ -81,6 +81,16 @@ REXCVAR_DEFINE_DOUBLE(skate3_portal_gate_riding_lift, 0.6, "Skate 3",
                       "the restored velocity (state-100 crossings kept ~45%, airborne ones 96%). 0 = off.")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
+REXCVAR_DEFINE_BOOL(skate3_portal_fling_onfoot, true, "Skate 3",
+                    "On-foot flings: a crossing made off the board (state 500: walking, jumping, falling) keeps its speed out of the exit, held "
+                    "through the actor's world velocity (+1248; the board is not under you, so its rates are left alone).")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
+REXCVAR_DEFINE_DOUBLE(skate3_portal_fling_floor_lift, 1.0, "Skate 3",
+                      "Metres above a floor exit's plane a crossing that comes out UPWARD (faster than 1.5 m/s) starts, so it starts airborne "
+                      "and keeps its speed (run 210: feet 5 cm above the floor = riding at once, speed 0.1-0.4 m/s, in and out of the portals).")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
 REXCVAR_DEFINE_INT32(skate3_portal_fling_frames, 10, "Skate 3",
                      "How many frames after a crossing the FLING assist holds the exit speed.")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
@@ -996,6 +1006,7 @@ struct Fling {
   int64_t t0 = 0;
   int topped = 0;
   float gravity = 9.81f;  // the AIR probe's measured value once 3+ clean arcs agree, else assumed
+  bool on_foot = false;   // off the board: only the actor's world velocity is held
 };
 Fling g_fling;
 std::atomic<uint32_t> g_human_entity{0};  // the human's presentation entity (nearest skater entity to the tracked point)
@@ -1005,6 +1016,28 @@ void FlingFrame(uint8_t* base, uint32_t self) {
   if (f.left <= 0) return;
   --f.left;
   ++f.k;
+  if (f.on_foot) {
+    // off the board: the actor's world velocity (+1248) is the one store we hold (WALK probe: which others carry it, R9)
+    const float t = float(std::chrono::steady_clock::now().time_since_epoch().count() - f.t0) * 1e-9f;
+    const float expect[3] = {f.vout[0], f.vout[1] - f.gravity * t, f.vout[2]};
+    const float e_along = expect[0] * f.dir[0] + expect[1] * f.dir[1] + expect[2] * f.dir[2];
+    float av[3];
+    if (e_along < 1.0f || !ReadVec(base, self + 1248, av)) {
+      REXLOG_INFO("portal-probe: FLING [f {}] on foot +{} done ({}), {} top-ups", g_gate_frame, f.k, e_along < 1.0f ? "gravity took the speed" : "actor unreadable",
+                  f.topped);
+      f.left = 0;
+      return;
+    }
+    const float along = av[0] * f.dir[0] + av[1] * f.dir[1] + av[2] * f.dir[2];
+    if (along < 0.9f * e_along) {
+      for (int c = 0; c < 3; ++c) WriteBeFloat(base, self + 1248 + 4 * c, av[c] + (e_along - along) * f.dir[c]);
+      ++f.topped;
+    }
+    REXLOG_INFO("portal-probe: FLING [f {}] on foot +{}: actor velocity {:.1f} m/s along the exit (expected {:.1f}){}", g_gate_frame, f.k, along, e_along,
+                along < 0.9f * e_along ? ", topped up" : "");
+    if (f.left == 0) REXLOG_INFO("portal-probe: FLING [f {}] on foot window over, {} top-ups", g_gate_frame, f.topped);
+    return;
+  }
   uint32_t state = 0, board = 0, block = 0;
   ReadBe32(base, self + 1336, &state);
   const bool have_block = ReadBe32(base, self + 1880, &board) && ReadBe32(base, board + 12, &block) && block >= 0x10000 &&
@@ -2546,13 +2579,43 @@ bool GateStep(PPCContext& ctx, uint8_t* base, uint32_t self) {
       REXLOG_INFO("portal-probe: EXITFIX {} exit: feet {:.2f} -> {:.2f} (plane {:.2f})", n[1] > 0.0f ? "floor" : "ceiling", was, feet_y, plane_y);
     }
   }
+  // An upward exit out of a floor portal (Portal's fling: fall in, fly out) must start AIRBORNE: feet on the floor are the riding (or
+  // standing) model, which drops the restored velocity the same frame (run 210 bridge test: out at 0.1-0.4 m/s, then back in).
+  float v_exit[3];
+  Turn(cross.vel, vel3, v_exit);
+  const float out_n = v_exit[0] * cross.exit_n[0] + v_exit[1] * cross.exit_n[1] + v_exit[2] * cross.exit_n[2];
+  if (cross.exit_n[1] > 0.7f && out_n > 1.5f) {
+    const float* c = cross.exit_c;
+    const float* n = cross.exit_n;
+    const float plane_y = c[1] - (n[0] * (cross.exit_pos[0] - c[0]) + n[2] * (cross.exit_pos[2] - c[2])) / n[1];
+    const float lift = float(REXCVAR_GET(skate3_portal_fling_floor_lift));
+    if (feet_y < plane_y + lift) {
+      REXLOG_INFO("portal-probe: GATE [f {}] floor exit flung up at {:.1f} m/s: feet {:.2f} -> {:.2f} (airborne start)", g_gate_frame, out_n, feet_y,
+                  plane_y + lift);
+      feet_y = plane_y + lift;
+    }
+  }
   const float target[16] = {hz, 0, -hx, 0, 0, 1, 0, 0, hx, 0, hz, 0, cross.exit_pos[0], feet_y, cross.exit_pos[2], 1};
   const bool ok = ArmTeleport(base, sp, self, flags, target);
   if (ok) g_last_cross_ns = std::chrono::steady_clock::now().time_since_epoch().count();
+  {
+    // one line per crossing (run 210: 146 crossings, 1 FLING line): the entry, and what FLING decided
+    const float v_in_sp = std::sqrt(vel3[0] * vel3[0] + vel3[1] * vel3[1] + vel3[2] * vel3[2]);
+    const float v_out_sp = std::sqrt(v_exit[0] * v_exit[0] + v_exit[1] * v_exit[1] + v_exit[2] * v_exit[2]);
+    const char* reason = !ok                                         ? "the relocation was refused (flags or board unreadable)"
+                         : !REXCVAR_GET(skate3_portal_fling)         ? "FLING is off (skate3_portal_fling)"
+                         : state_at_cross == 500 && !REXCVAR_GET(skate3_portal_fling_onfoot) ? "on foot and skate3_portal_fling_onfoot is off"
+                         : v_out_sp <= 1.0f                          ? "too slow to hold (under 1 m/s)"
+                                                                     : nullptr;
+    REXLOG_INFO("portal-probe: FLING [f {}] decision: {}{}; entry v ({:.1f}, {:.1f}, {:.1f}) {:.1f} m/s, falling {:.1f} m/s, {} {}; exit v ({:.1f}, {:.1f}, "
+                "{:.1f}) {:.1f} m/s, {:.1f} m/s out of the {} portal", g_gate_frame, reason ? "not armed: " : "ARMED", reason ? reason : "", vel3[0], vel3[1],
+                vel3[2], v_in_sp, std::max(0.0f, -vel3[1]), state_at_cross == 500 ? "on foot" : riding ? "riding" : "airborne", state_at_cross, v_exit[0],
+                v_exit[1], v_exit[2], v_out_sp, out_n, SurfaceKind(cross.exit_n));
+  }
   // Run 194: the only armed fling was an on-foot crossing (v_in -2.8, -0.1, -1.4 = walking pace) and stopped at +1 "bailed" (state 500).
   // Off the board the board is not under the skater: topping up its rates would launch the loose board, not the player. The on-foot
   // velocity store is unknown (AIR's state histogram and spec request R9), so no FLING there.
-  if (ok && REXCVAR_GET(skate3_portal_fling) && state_at_cross == 500) {
+  if (ok && REXCVAR_GET(skate3_portal_fling) && state_at_cross == 500 && !REXCVAR_GET(skate3_portal_fling_onfoot)) {
     REXLOG_INFO("portal-probe: FLING [f {}] not armed: crossing off the board (state 500, on foot or bailed)", g_gate_frame);
   } else if (ok && REXCVAR_GET(skate3_portal_fling)) {
     float vo[3];
@@ -2567,6 +2630,7 @@ bool GateStep(PPCContext& ctx, uint8_t* base, uint32_t self) {
         g_fling.vout[c] = g_fling.dir[c] * g_fling.speed;
       }
       g_fling.t0 = std::chrono::steady_clock::now().time_since_epoch().count();
+      g_fling.on_foot = state_at_cross == 500;
       const bool measured = g_air_gravity_n.load() >= 3;
       if (measured) g_fling.gravity = g_air_gravity.load();
       REXLOG_INFO("portal-probe: FLING [f {}] armed: v_in ({:.1f}, {:.1f}, {:.1f}) -> v_out ({:.1f}, {:.1f}, {:.1f}) {:.1f} m/s for {} frames, gravity {:.2f} ({})", g_gate_frame,

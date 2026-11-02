@@ -1064,22 +1064,37 @@ bool WalkIntent(float dir[2], float* magnitude) {
 // FPVWALK: in portal first person on foot, the walking stick re-expressed relative to the shown view (portal_math::RemapStick).
 static void WalkRemap(int16_t* lx, int16_t* ly) {
   g_walk_mag = 0.0f;
-  if (!lx || !ly || !REXCVAR_GET(skate3_portal_fpv_walk) || !FpvActive() || !g_on_foot.load()) return;
-  const float sx = float(*lx) / 32767.0f, sy = float(*ly) / 32767.0f;
+  // Run 210: no FPVWALK line at all and "no inputs" on foot in first person. Every 2 s while first person is on, one line says what reached
+  // this filter (even a zero stick) and what was done with it, so a run shows whether the stick / WASD arrive here at all.
+  static int64_t last_log = 0;
+  const char* why = nullptr;
+  const int16_t in_x = lx ? *lx : 0, in_y = ly ? *ly : 0;
+  float ox = 0, oy = 0, wd[2] = {0, 0};
+  const float sx = float(in_x) / 32767.0f, sy = float(in_y) / 32767.0f;
   const float mag = std::min(1.0f, std::hypot(sx, sy));
-  if (mag < 0.15f) return;
   float game[16], shown[16];
-  if (!native_scene::GameCameraView(game) || !native_scene::ShownCameraView(shown)) return;
-  float ox, oy, wd[2];
-  if (!portal_math::RemapStick(game, shown, sx, sy, &ox, &oy, wd)) return;
-  // keep the stick's length (the remap is a rotation, but float noise must never push it past full deflection)
-  const float ol = std::hypot(ox, oy);
-  if (ol > 1e-4f) ox *= mag / ol, oy *= mag / ol;
-  *lx = int16_t(std::clamp(ox * 32767.0f, -32767.0f, 32767.0f));
-  *ly = int16_t(std::clamp(oy * 32767.0f, -32767.0f, 32767.0f));
-  g_walk_dir_x = wd[0];
-  g_walk_dir_z = wd[1];
-  g_walk_mag = mag;
+  if (!lx || !ly) why = "no stick passed to the filter";
+  else if (!REXCVAR_GET(skate3_portal_fpv_walk)) why = "skate3_portal_fpv_walk is off";
+  else if (!FpvActive()) why = "first person is off";
+  else if (!g_on_foot.load()) why = "not on foot (riding: the stick steers the board)";
+  else if (mag < 0.15f) why = "stick at rest";
+  else if (!native_scene::GameCameraView(game)) why = "no game camera captured";
+  else if (!native_scene::ShownCameraView(shown)) why = "no shown view (first person not engaged in the renderer)";
+  else if (!portal_math::RemapStick(game, shown, sx, sy, &ox, &oy, wd)) why = "a view looks straight up or down";
+  if (!why) {
+    const float ol = std::hypot(ox, oy);
+    if (ol > 1e-4f) ox *= mag / ol, oy *= mag / ol;
+    *lx = int16_t(std::clamp(ox * 32767.0f, -32767.0f, 32767.0f));
+    *ly = int16_t(std::clamp(oy * 32767.0f, -32767.0f, 32767.0f));
+    g_walk_dir_x = wd[0];
+    g_walk_dir_z = wd[1];
+    g_walk_mag = mag;
+  }
+  if (FpvActive() && now_ns() - last_log > 2'000'000'000ll) {
+    last_log = now_ns();
+    REXLOG_INFO("portal-gate: FPVWALK input: stick ({}, {}) -> ({}, {}), {}", in_x, in_y, lx ? *lx : 0, ly ? *ly : 0,
+                why ? why : "re-expressed relative to your view");
+  }
 }
 
 void FilterPad(uint16_t* buttons, uint8_t* left_trigger, uint8_t* right_trigger, int16_t* rx, int16_t* ry, int16_t* lx, int16_t* ly) {

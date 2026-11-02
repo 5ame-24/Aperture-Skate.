@@ -827,3 +827,20 @@ Actor offsets: +1200/+1216 ground pos, +1232 delta, +1248 velocity, +1296 flags,
 
 ## Roadmap
 - Item dropper: add the rolled-back gel dropper (item 65) as an item dropper, since the tester thought it was a decent item.
+74. Run 210 (bridge fling test, walk test) -> fixes (built, untested).
+    - Bridge fling (fall into a floor portal, fly out of the other): the skater went "in and out" with exit speeds 0.1-0.4 m/s, 146
+      crossings, 1 FLING line. A floor exit put the feet 5 cm above the floor (EXITFIX) = the riding / standing model at once, which drops
+      the restored velocity (the gel-lift finding); then standing in the floor opening sent it back. An exit that comes out of a floor
+      portal UPWARD (> 1.5 m/s along its normal) now starts skate3_portal_fling_floor_lift (1.0 m) above the plane, airborne; FLING holds
+      v_out = R v_in (Portal's rule). Note: "speed after crossing" in the GATE lines is horizontal only (an upward exit reads ~0); CROSSCHECK
+      has the 3D speed.
+    - One `FLING [f N] decision: ARMED | not armed: <reason>` per crossing with the entry velocity, the fall speed, riding / airborne / on foot,
+      and the exit velocity / speed out of the exit portal. Reasons: relocation refused, FLING off, on foot with on-foot flings off, < 1 m/s.
+      (Run 210's silence fits either refused relocations or skate3_portal_fling off in the saved settings: the line says which.)
+    - On-foot flings (skate3_portal_fling_onfoot, on): a crossing in state 500 arms FLING too, holding only the actor's world velocity
+      (+1248; the board is not under you). `FLING on foot +k: actor velocity X along the exit (expected Y), topped up`. Whether +1248 moves
+      a walking / falling skater is what these lines show (topped up every frame = not the store; the WALK probe lists the others).
+    - Walk: `FPVWALK input: stick (x, y) -> (x', y'), <what was done or why not>` every 2 s while first person is on, even for a zero stick:
+      shows whether the stick / WASD reach the filter. Note: "keys turn the camera, no inputs" is what the DRONE camera does (End key: it
+      takes the keyboard and blocks game input); the freecam ENGAGED line now says drone or first person.
+    - Merged portal-mashup (the tester's dropper rollback a0dcc57); the dropper's remains (cvar, Ctrl+Shift+H text) are gone.
