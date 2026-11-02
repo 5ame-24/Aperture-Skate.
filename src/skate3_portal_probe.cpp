@@ -81,6 +81,11 @@ REXCVAR_DEFINE_DOUBLE(skate3_portal_gate_riding_lift, 0.6, "Skate 3",
                       "the restored velocity (state-100 crossings kept ~45%, airborne ones 96%). 0 = off.")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
+REXCVAR_DEFINE_BOOL(skate3_portal_fling_release_onboard, true, "Skate 3",
+                    "Fling exits (steep or upward): force the on-board byte only while the teleport lasts (state 700/702), not 12 frames, so the "
+                    "game can go airborne instead of snapping the board to the ground (run 211: riding at once, flings gone).")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
 REXCVAR_DEFINE_BOOL(skate3_portal_fling_onfoot, true, "Skate 3",
                     "On-foot flings: a crossing made off the board (state 500: walking, jumping, falling) keeps its speed out of the exit, held "
                     "through the actor's world velocity (+1248; the board is not under you, so its rates are left alone).")
@@ -393,6 +398,11 @@ bool ReadBe32(uint8_t* base, uint32_t addr, uint32_t* out) {
 // this+1296 is set it fetches a target matrix with sub_82585CB0 into a stack buffer (caller sp - 96),
 // calls the teleport executor 82DB8998 with it, and clears the bit itself. Here we raise that bit once
 // and swap the matrix for ours; a marker relocation that is already pending is never touched.
+void WriteBe32(uint8_t* base, uint32_t addr, uint32_t v) {
+  const uint32_t be = __builtin_bswap32(v);
+  std::memcpy(base + addr, &be, 4);
+}
+
 void WriteBeFloat(uint8_t* base, uint32_t addr, float v) {
   const uint32_t be = __builtin_bswap32(std::bit_cast<uint32_t>(v));
   std::memcpy(base + addr, &be, 4);
@@ -842,6 +852,19 @@ bool g_restore_turn = false;
 // a crossing could land on either. Keep it set for the frames around a crossing.
 constexpr uint32_t kOnBoardByte = 10768;
 int g_onboard_frames = 0;
+// Run 211: a fling exit read state 100 / flags C0000000 (riding) at once and every top-up was gone the next frame: forcing the on-board byte
+// for 12 frames after each crossing keeps the teleport ending in riding (not a bail), but riding snaps the board to the ground and drops the
+// upward speed. For a steep exit (a fling) the byte is forced only while the Teleporting state (700/702) lasts, then the game may go airborne.
+bool g_onboard_teleport_only = false;
+// A fling exit waiting for its teleport to end, then the mode's move (skate3_portal_fling_mode), then one result line 1.2 s later.
+struct FlingExit {
+  bool pending = false, watching = false;
+  int mode = 0, seq = 0;
+  float y0 = 0, peak = 0, vout_y = 0, gravity = 9.81f;
+  int64_t t0 = 0;
+} g_fexit;
+int g_fexit_seq = 0;
+bool g_fling_steep_exit = false;  // set by the crossing: |v_out.y| > half its speed, or out of a floor upward
 int g_recover_window = 0;  // frames after a crossing in which the game's own recovery warps keep the board's rates
 
 void ForceOnBoard(uint8_t* base, uint32_t self, const char* when) {
@@ -1013,8 +1036,6 @@ struct Fling {
 bool FlingConverged(Fling& f, bool on_target) {
   f.ok_run = on_target ? f.ok_run + 1 : 0;
   if (f.ok_run >= 4 && f.k >= 6) {
-    REXLOG_INFO("portal-probe: FLING [f {}] {}+{} converged: on target {} updates in a row, {} top-ups, hold released", g_gate_frame,
-                f.on_foot ? "on foot " : "", f.k, f.ok_run, f.topped);
     f.left = 0;
     return true;
   }
@@ -1057,7 +1078,6 @@ void FlingFrame(uint8_t* base, uint32_t self) {
       if (ns > 0) along = float(sum / ns), measured = "skeleton carriers";
     }
     if (FlingConverged(f, along >= 0.9f * e_along)) return;
-    int topped_skel = 0;
     if (along < 0.9f * e_along) {
       const float add = e_along - along;
       for (int c = 0; c < 3; ++c) WriteBeFloat(base, self + 1248 + 4 * c, av[c] + add * f.dir[c]);
@@ -1067,14 +1087,10 @@ void FlingFrame(uint8_t* base, uint32_t self) {
           const uint32_t a = skel + 0x2770 + 16 * k;
           if (!(mask & (1u << k)) || !ReadVec(base, a, sv)) continue;
           for (int c = 0; c < 3; ++c) WriteBeFloat(base, a + 4 * c, sv[c] + add * f.dir[c]);
-          ++topped_skel;
         }
       }
       ++f.topped;
     }
-    REXLOG_INFO("portal-probe: FLING [f {}] on foot +{}: {:.1f} m/s along the exit by the {} (expected {:.1f}){}", g_gate_frame, f.k, along, measured, e_along,
-                along < 0.9f * e_along ? (topped_skel ? ", topped up (actor + skeleton)" : ", topped up (actor)") : "");
-    if (f.left == 0) REXLOG_INFO("portal-probe: FLING [f {}] on foot window over, {} top-ups", g_gate_frame, f.topped);
     return;
   }
   uint32_t state = 0, board = 0, block = 0;
@@ -1111,9 +1127,7 @@ void FlingFrame(uint8_t* base, uint32_t self) {
     return;
   }
   if (FlingConverged(f, along >= 0.9f * e_along)) return;
-  if (along >= 0.9f * e_along) {
-    REXLOG_INFO("portal-probe: FLING [f {}] +{} ok: {:.1f} m/s along the exit (expected {:.1f}), state {}", g_gate_frame, f.k, along, e_along, state);
-  } else {
+  if (along < 0.9f * e_along) {
     const float add = e_along - along;
     for (int i = 0; i < 7; ++i) {
       float v[3];
@@ -1128,7 +1142,6 @@ void FlingFrame(uint8_t* base, uint32_t self) {
     ++f.topped;
     const uint32_t mask = REXCVAR_GET(skate3_portal_fling_skeleton) ? g_air_skel_mask.load() : 0u;
     uint32_t skel = 0;
-    int skel_topped = 0;
     if (mask && ReadBe32(base, self + 1884, &skel) && skel >= 0x10000 && skel < 0xC0000000 && !(skel & 3)) {
       for (int k = 0; k < kAirSkel; ++k) {
         if (!(mask & (1u << k))) continue;
@@ -1138,14 +1151,9 @@ void FlingFrame(uint8_t* base, uint32_t self) {
         const float sa = sv[0] * f.dir[0] + sv[1] * f.dir[1] + sv[2] * f.dir[2];
         if (sa >= 0.9f * e_along) continue;
         for (int c = 0; c < 3; ++c) WriteBeFloat(base, a + 4 * c, sv[c] + (e_along - sa) * f.dir[c]);
-        ++skel_topped;
       }
     }
-    if (skel_topped) REXLOG_INFO("portal-probe: FLING [f {}] +{} also topped up {} skeleton vectors (learned by AIR)", g_gate_frame, f.k, skel_topped);
-    REXLOG_INFO("portal-probe: FLING [f {}] +{} topped up: {:.1f} -> {:.1f} m/s along the exit ({:.2f}, {:.2f}, {:.2f}), state {}", g_gate_frame, f.k, along, e_along,
-                f.dir[0], f.dir[1], f.dir[2], state);
   }
-  if (f.left == 0) REXLOG_INFO("portal-probe: FLING [f {}] window over after {} frames, {} top-ups", g_gate_frame, f.k, f.topped);
 }
 
 // ---- AIR probe (spec request R5, read-only): the game's gravity and the store that carries the airborne velocity ----
@@ -2555,8 +2563,8 @@ bool GateStep(PPCContext& ctx, uint8_t* base, uint32_t self) {
     const float svl = std::sqrt(sv[0] * sv[0] + sv[1] * sv[1] + sv[2] * sv[2]);
     const bool use = have_store && svl < kMaxExitSpeed && dd < std::max(3.0f, 0.5f * ev);
     if (use) std::copy(sv, sv + 3, v_entry);
-    REXLOG_INFO("portal-probe: CONSISTENCY [f {}] entry velocity from the {}: ({:.1f}, {:.1f}, {:.1f}) {:.1f} m/s; estimate ({:.1f}, {:.1f}, {:.1f}) {:.1f} m/s, "
-                "differ by {:.1f}{}", g_gate_frame, use ? src : "position estimate", v_entry[0], v_entry[1], v_entry[2],
+    if (have_store && !use) REXLOG_INFO("portal-probe: CONSISTENCY [f {}] entry velocity (crossing #{}) from the {}: ({:.1f}, {:.1f}, {:.1f}) {:.1f} m/s; position estimate "
+                "(smoothed, lags under hard acceleration) ({:.1f}, {:.1f}, {:.1f}) {:.1f} m/s, differ by {:.1f}{}", g_gate_frame, g_check_seq + 1, use ? src : "position estimate", v_entry[0], v_entry[1], v_entry[2],
                 std::sqrt(v_entry[0] * v_entry[0] + v_entry[1] * v_entry[1] + v_entry[2] * v_entry[2]), vel3[0], vel3[1], vel3[2], ev, have_store ? dd : 0.0f,
                 have_store && !use ? (std::string(" (") + src + " rejected: too far from the estimate)").c_str() : "");
   }
@@ -2709,11 +2717,15 @@ bool GateStep(PPCContext& ctx, uint8_t* base, uint32_t self) {
   float v_exit[3];
   Turn(cross.vel, v_entry, v_exit);
   const float out_n = v_exit[0] * cross.exit_n[0] + v_exit[1] * cross.exit_n[1] + v_exit[2] * cross.exit_n[2];
+  {
+    const float vl = std::sqrt(v_exit[0] * v_exit[0] + v_exit[1] * v_exit[1] + v_exit[2] * v_exit[2]);
+    g_fling_steep_exit = (vl > 1.0f && std::abs(v_exit[1]) > 0.5f * vl) || (cross.exit_n[1] > 0.7f && out_n > 0.5f);
+  }
   if (cross.exit_n[1] > 0.7f && out_n > 0.5f) {  // (any real outward motion: the same rule for every speed)
     const float* c = cross.exit_c;
     const float* n = cross.exit_n;
     const float plane_y = c[1] - (n[0] * (cross.exit_pos[0] - c[0]) + n[2] * (cross.exit_pos[2] - c[2])) / n[1];
-    const float lift = float(REXCVAR_GET(skate3_portal_fling_floor_lift));
+    const float lift = skate3::portal_gate::FlingMode() == 2 ? 3.0f : float(REXCVAR_GET(skate3_portal_fling_floor_lift));  // "lift" mode: beyond the snap
     if (feet_y < plane_y + lift) {
       REXLOG_INFO("portal-probe: GATE [f {}] floor exit flung up at {:.1f} m/s: feet {:.2f} -> {:.2f} (airborne start)", g_gate_frame, out_n, feet_y,
                   plane_y + lift);
@@ -3364,6 +3376,43 @@ extern "C" REX_FUNC(sub_82DB88C8) {
     ReplayBundle(base);
   }
   if (self == g_human && g_recover_window > 0) --g_recover_window;
+  if (self == g_human && g_fexit.pending) {
+    uint32_t st = 0;
+    ReadBe32(base, self + 1336, &st);
+    if (st != 700 && st != 702) {
+      // the teleport is over (the game put the skater down riding): get airborne the chosen way, so the held exit velocity sticks
+      g_fexit.pending = false;
+      g_onboard_frames = 0;  // every mode releases the on-board byte
+      if (g_fexit.mode == 0) {
+        skate3::portal_gate::RequestOllie();  // the game's own pop
+      } else if (g_fexit.mode == 1) {
+        uint32_t fl = 0, skel = 0, w = 0;
+        WriteBe32(base, self + 1336, 200);
+        if (ReadBe32(base, self + 1296, &fl)) WriteBe32(base, self + 1296, (fl & 0x0FFFFFFFu) | 0x90000000u);
+        if (ReadBe32(base, self + 1884, &skel) && ReadBe32(base, skel + kOnBoardByte, &w)) WriteBe32(base, skel + kOnBoardByte, w & ~0x01000000u);
+      }
+      float ent[3];
+      const uint32_t he = g_human_entity;
+      g_fexit.watching = he && skate3::native_entity::CharacterWorldPos(base, he, ent);
+      g_fexit.y0 = g_fexit.peak = g_fexit.watching ? ent[1] : 0.0f;
+      g_fexit.t0 = std::chrono::steady_clock::now().time_since_epoch().count();
+    }
+  }
+  if (self == g_human && g_fexit.watching) {
+    float ent[3];
+    const uint32_t he = g_human_entity;
+    if (he && skate3::native_entity::CharacterWorldPos(base, he, ent)) g_fexit.peak = std::max(g_fexit.peak, ent[1]);
+    const float t = float(std::chrono::steady_clock::now().time_since_epoch().count() - g_fexit.t0) * 1e-9f;
+    if (t > 1.2f) {
+      g_fexit.watching = false;
+      const float g = g_fexit.gravity, vy = g_fexit.vout_y;
+      const float free_rise = vy > 0 ? vy * vy / (2.0f * g) : 0.0f;
+      const float rose = g_fexit.peak - g_fexit.y0;
+      REXLOG_INFO("portal-probe: FLING #{} [{}]: rose {:.2f} m (a free flight at {:.1f} m/s up would rise {:.2f} m) - {}", g_fexit.seq,
+                  skate3::portal_gate::FlingModeName(g_fexit.mode), rose, vy, free_rise,
+                  free_rise < 0.5f ? "not an upward fling" : rose > 0.5f * free_rise ? "FLEW" : rose > 0.15f * free_rise ? "partly" : "NOT FLYING");
+    }
+  }
   if (self == g_human && g_onboard_frames > 0) ForceOnBoard(base, self, "before the frame");
   __imp__sub_82DB88C8(ctx, base);
   t_surgery = false;
@@ -3378,6 +3427,14 @@ extern "C" REX_FUNC(sub_82DB88C8) {
   }
   if (self == g_human && gate_armed) {
     g_onboard_frames = 12;
+    g_onboard_teleport_only = g_fling_steep_exit && REXCVAR_GET(skate3_portal_fling_release_onboard);
+    if (g_fling_steep_exit && g_fling.left > 0) {
+      g_fexit.pending = true;  // the mode's move once the teleport ends
+      g_fexit.mode = skate3::portal_gate::FlingMode();
+      g_fexit.seq = ++g_fexit_seq;
+      g_fexit.vout_y = g_fling.vout[1];
+      g_fexit.gravity = g_fling.gravity;
+    }
     g_recover_window = 300;
     LogActor(base, self, "after the teleport");
   }

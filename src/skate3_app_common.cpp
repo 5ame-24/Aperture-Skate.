@@ -712,6 +712,8 @@ void Skate3BaseApp::OnCreateDialogs(rex::ui::ImGuiDrawer* drawer) {
                         [] { skate3::portal_gate::RequestSelfTest(); });
   rex::ui::RegisterBind("bind_skate3_portal_gel", "Ctrl+H", "Portal gate: gel mode on/off (the gun paints blue bounce / orange speed gel)",
                         [] { skate3::portal_gel::ToggleMode(); });
+  rex::ui::RegisterBind("bind_skate3_portal_fling_mode", "Ctrl+F", "Portal gate: fling exit mode (ollie / air / lift / release)",
+                        [] { skate3::portal_gate::CycleFlingMode(); });
   rex::ui::RegisterBind("bind_skate3_portal_grab", "Ctrl+G", "Portal gate: grab / drop the companion cube",
                         [] { skate3::portal_cube::RequestGrab(); });
   rex::ui::RegisterBind("bind_skate3_menu", "Escape", "Skate 3 settings", [this] {

@@ -60,6 +60,13 @@ REXCVAR_DEFINE_DOUBLE(skate3_portal_gate_open_time, 0.25, "Skate 3",
                       "Seconds a new portal takes to open (it grows from its centre with a small overshoot, as in Portal); 0 = instant.")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
+REXCVAR_DEFINE_STRING(skate3_portal_fling_mode, "ollie", "Skate 3",
+                      "How a fling exit (steep / upward) gets airborne, so the held exit velocity sticks (the game ends every teleport riding, "
+                      "and riding drops upward speed): ollie = the right-stick ollie flick is played for you at the exit (the game's own pop); "
+                      "air = the air state is set directly; lift = the exit starts 3 m up, out of reach of the ground snap; release = only "
+                      "the on-board byte is released. Ctrl+F cycles.")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
 REXCVAR_DEFINE_BOOL(skate3_portal_fpv_walk, true, "Skate 3",
                     "Portal-style walking in first person: on foot, the left stick / WASD move relative to where you LOOK (the game moves you "
                     "relative to its own hidden third-person camera). Riding is unchanged. Log prefix FPVWALK.")
@@ -1062,6 +1069,34 @@ bool WalkIntent(float dir[2], float* magnitude) {
 }
 
 // FPVWALK: in portal first person on foot, the walking stick re-expressed relative to the shown view (portal_math::RemapStick).
+static const char* kFlingModes[] = {"ollie", "air", "lift", "release"};
+int FlingMode() {
+  const std::string m = REXCVAR_GET(skate3_portal_fling_mode);
+  for (int i = 0; i < 4; ++i)
+    if (m == kFlingModes[i]) return i;
+  return 0;
+}
+const char* FlingModeName(int m) { return kFlingModes[m >= 0 && m < 4 ? m : 0]; }
+void CycleFlingMode() {
+  static std::atomic<int64_t> last{0};
+  if (now_ns() - last.load() < 400'000'000) return;
+  last = now_ns();
+  const int next = (FlingMode() + 1) % 4;
+  rex::cvar::SetFlagByName("skate3_portal_fling_mode", kFlingModes[next]);
+  REXLOG_INFO("portal-gate: FLING mode now {} (Ctrl+F cycles ollie / air / lift / release)", kFlingModes[next]);
+}
+// The ollie flick played for the skater at a fling exit: right stick pulled down, then flicked up (the game's own pop), ~0.1 s each.
+std::atomic<int64_t> g_ollie_ns{0};
+void RequestOllie() { g_ollie_ns = now_ns(); }
+static void OllieInject(int16_t* rx, int16_t* ry) {
+  const int64_t t0 = g_ollie_ns.load();
+  if (!t0 || !rx || !ry) return;
+  const float age = float(now_ns() - t0) * 1e-9f;
+  if (age > 0.22f) return;
+  *rx = 0;
+  *ry = age < 0.10f ? int16_t(-32767) : int16_t(32767);
+}
+
 static void WalkRemap(int16_t* lx, int16_t* ly) {
   g_walk_mag = 0.0f;
   // Run 210: no FPVWALK line at all and "no inputs" on foot in first person. Every 2 s while first person is on, one line says what reached
@@ -1099,6 +1134,7 @@ static void WalkRemap(int16_t* lx, int16_t* ly) {
 
 void FilterPad(uint16_t* buttons, uint8_t* left_trigger, uint8_t* right_trigger, int16_t* rx, int16_t* ry, int16_t* lx, int16_t* ly) {
   WalkRemap(lx, ly);
+  OllieInject(rx, ry);
   constexpr uint16_t kY = 0x8000, kR3 = 0x0080, kX = 0x4000, kR1 = 0x0200, kB = 0x2000;  // XInput button bits
   static bool was_rt = false, was_lt = false, was_y = false, was_r3 = false, was_x = false, was_r1 = false, was_b = false;
   static auto last = std::chrono::steady_clock::now();
@@ -1544,6 +1580,7 @@ void Overlay::OnDraw(ImGuiIO& io) {
                      REXCVAR_GET(skate3_portal_gate_mouse)
                          ? "PORTAL GUN ON  (aim with the mouse: left click blue, right click orange, middle clear)"
                          : "PORTAL GUN ON  (hold D-pad down: right stick aims, RT blue, LT orange, Y clear, R1 grab, X cube; or Ctrl+1/2/3, Ctrl+G, Ctrl+5)");
+  ImGui::TextColored(ImVec4(0.6f, 0.8f, 1.0f, 1.0f), "fling: %s (Ctrl+F)", FlingModeName(FlingMode()));
   if (portal_gel::Mode()) {
     ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f), "GEL MODE: blue = bounce, orange = speed, clear removes gel (%d painted; Ctrl+H or D-pad down + B for portals)",
                        portal_gel::Count());
