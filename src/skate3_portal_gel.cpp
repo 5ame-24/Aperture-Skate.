@@ -101,7 +101,7 @@ void ToggleMode() {
               Count());
 }
 
-void Paint(int kind, const float hit[3], const float normal[3], uint32_t frame) {
+void PaintImpl(int kind, const float hit[3], const float normal[3], uint32_t frame, bool quiet) {
   pm::GelPatch p;
   const float nl = std::sqrt(pm::Dot(normal, normal));
   if (nl < 0.5f) return;
@@ -119,11 +119,16 @@ void Paint(int kind, const float hit[3], const float normal[3], uint32_t frame) 
     g_count = g_n;
   }
   const uint32_t id = p.id;
+  if (quiet) return;
   REXLOG_INFO("portal-gel: GEL [f {}] painted {} #{} on a {} at ({:.2f}, {:.2f}, {:.2f}) normal ({:.2f}, {:.2f}, {:.2f}), covered {}, {} patches",
               frame, p.kind ? "orange" : "blue", id, Surface(p), p.c[0], p.c[1], p.c[2], p.n[0], p.n[1], p.n[2], covered, n);
 }
 
+void Paint(int kind, const float hit[3], const float normal[3], uint32_t frame) { PaintImpl(kind, hit, normal, frame, false); }
+
+void ClearStreams();
 void Clear() {
+  ClearStreams();
   int was;
   {
     std::lock_guard<std::mutex> lock(g_mutex);
@@ -266,6 +271,193 @@ bool BodyStep(const float p[3], const float v[3], float out_v[3]) {
     if (pm::GelBounce(list[i], v, false, r, out_v)) return true;
   }
   return false;
+}
+
+
+// ---- droppers and blobs ----
+namespace {
+struct Dropper {
+  float p[3];
+  int kind;
+  int64_t next_ns;
+};
+struct Blob {
+  uint32_t id;
+  float p[3], v[3];
+  int kind;
+  int64_t born_ns;
+  bool hit_known = false, ray_out = false;
+  float hit[3], hit_n[3];
+  int64_t ray_ns = 0;
+  int hops = 0;
+};
+constexpr int kDroppers = 4, kBlobs = 24;
+std::mutex g_stream_mutex;
+std::vector<Dropper> g_droppers;
+std::vector<Blob> g_blobs;
+uint32_t g_next_blob = 1;
+std::atomic<bool> g_dropper_mode{false};
+int g_blob_paints = 0, g_blob_hops = 0, g_blob_lost = 0;
+}  // namespace
+
+void ClearStreams() {
+  std::lock_guard<std::mutex> lock(g_stream_mutex);
+  if (!g_droppers.empty()) REXLOG_INFO("portal-gel: GEL droppers cleared ({}), {} blobs dropped", g_droppers.size(), g_blobs.size());
+  g_droppers.clear();
+  g_blobs.clear();
+}
+
+bool DropperMode() { return Mode() && g_dropper_mode.load(); }
+
+void ToggleDropperMode() {
+  static std::atomic<int64_t> last{0};
+  const int64_t now = NowNs();
+  if (now - last.load() < 400'000'000) return;
+  last = now;
+  if (!Mode()) {
+    REXLOG_INFO("portal-gel: GEL dropper key ignored: gel mode is off (Ctrl+H first)");
+    return;
+  }
+  const bool on = !g_dropper_mode.load();
+  g_dropper_mode = on;
+  REXLOG_INFO("portal-gel: GEL gun sub-mode: {}", on ? "DROPPER (a shot places a gel dropper)" : "paint");
+}
+
+void PlaceDropper(int kind, const float hit[3], const float normal[3], uint32_t frame) {
+  Dropper d;
+  const bool ceiling = normal[1] < -pm::kFlatNy;
+  for (int k = 0; k < 3; ++k) d.p[k] = hit[k] + (ceiling ? normal[k] * 0.25f : 0.0f);
+  if (!ceiling) d.p[1] += 4.0f;  // a floor or wall hit: the dropper hangs 4 m above it
+  d.kind = kind ? 1 : 0;
+  d.next_ns = NowNs();
+  size_t n;
+  {
+    std::lock_guard<std::mutex> lock(g_stream_mutex);
+    if (g_droppers.size() >= size_t(kDroppers)) g_droppers.erase(g_droppers.begin());
+    g_droppers.push_back(d);
+    n = g_droppers.size();
+  }
+  REXLOG_INFO("portal-gel: GEL [f {}] dropper placed: {} at ({:.2f}, {:.2f}, {:.2f}) ({}), {} droppers", frame, d.kind ? "orange" : "blue", d.p[0], d.p[1],
+              d.p[2], ceiling ? "under the ceiling" : "4 m above the hit", n);
+}
+
+void StreamStep(float dt, float gravity, const pm::Frame* portals, uint32_t frame) {
+  if (!Enabled()) return;
+  struct PaintAt {
+    int kind;
+    float p[3], n[3];
+  };
+  std::vector<PaintAt> paints;
+  const int64_t now = NowNs();
+  {
+    std::lock_guard<std::mutex> lock(g_stream_mutex);
+    if (g_droppers.empty() && g_blobs.empty()) return;
+    for (Dropper& d : g_droppers) {
+      if (now < d.next_ns || g_blobs.size() >= size_t(kBlobs)) continue;
+      d.next_ns = now + 200'000'000;
+      Blob b;
+      b.id = g_next_blob++;
+      std::copy(d.p, d.p + 3, b.p);
+      // a small wobble so the stream is a stream, not a line
+      const float a = float(b.id % 16) * 0.3927f;
+      b.v[0] = 0.25f * std::cos(a);
+      b.v[1] = -1.0f;
+      b.v[2] = 0.25f * std::sin(a);
+      b.kind = d.kind;
+      b.born_ns = now;
+      g_blobs.push_back(b);
+    }
+    for (size_t i = 0; i < g_blobs.size();) {
+      Blob& b = g_blobs[i];
+      const float before[3] = {b.p[0], b.p[1], b.p[2]};
+      const int through = pm::BlobAdvance(portals, b.p, b.v, gravity, dt, 5.7f);
+      if (through >= 0) {
+        b.hit_known = false;  // a new path: ask again
+        b.ray_out = false;
+        ++b.hops;
+        if (g_blob_hops++ < 10) {
+          REXLOG_INFO("portal-gel: GEL [f {}] blob {} went through the {} portal, out at ({:.2f}, {:.2f}, {:.2f}) v ({:.1f}, {:.1f}, {:.1f})", frame, b.id,
+                      through ? "orange" : "blue", b.p[0], b.p[1], b.p[2], b.v[0], b.v[1], b.v[2]);
+        }
+      }
+      bool landed = false;
+      if (b.hit_known) {
+        // landed once this step crossed the surface the ray found (or came within a few cm of the hit)
+        const float a0 = (before[0] - b.hit[0]) * b.hit_n[0] + (before[1] - b.hit[1]) * b.hit_n[1] + (before[2] - b.hit[2]) * b.hit_n[2];
+        const float a1 = (b.p[0] - b.hit[0]) * b.hit_n[0] + (b.p[1] - b.hit[1]) * b.hit_n[1] + (b.p[2] - b.hit[2]) * b.hit_n[2];
+        landed = a0 >= 0.0f && a1 <= 0.03f;
+      }
+      if (landed) {
+        paints.push_back({b.kind, {b.hit[0], b.hit[1], b.hit[2]}, {b.hit_n[0], b.hit_n[1], b.hit_n[2]}});
+        g_blobs.erase(g_blobs.begin() + long(i));
+        continue;
+      }
+      if (now - b.born_ns > 5'000'000'000ll || b.p[1] < -100.0f) {
+        ++g_blob_lost;
+        g_blobs.erase(g_blobs.begin() + long(i));
+        continue;
+      }
+      ++i;
+    }
+  }
+  for (const PaintAt& pa : paints) {
+    PaintImpl(pa.kind, pa.p, pa.n, frame, true);
+    if (g_blob_paints++ % 50 == 0) {
+      REXLOG_INFO("portal-gel: GEL [f {}] blob paint #{} ({}) at ({:.2f}, {:.2f}, {:.2f}); {} lost (no surface in 5 s)", frame, g_blob_paints,
+                  pa.kind ? "orange" : "blue", pa.p[0], pa.p[1], pa.p[2], g_blob_lost);
+    }
+  }
+}
+
+bool NextBlobRay(uint32_t* blob, float o[3], float d[3], float* len) {
+  std::lock_guard<std::mutex> lock(g_stream_mutex);
+  // the blob that has waited longest for an answer (or never had one)
+  Blob* pick = nullptr;
+  const int64_t now = NowNs();
+  for (Blob& b : g_blobs) {
+    if (b.ray_out && now - b.ray_ns < 300'000'000) continue;  // one in flight (answer lost after 0.3 s: ask again)
+    if (b.hit_known && now - b.ray_ns < 250'000'000) continue;  // a fresh answer: the path is a curve, refresh it every 0.25 s
+    if (!pick || b.ray_ns < pick->ray_ns) pick = &b;
+  }
+  if (!pick) return false;
+  const float sp = std::sqrt(pm::Dot(pick->v, pick->v));
+  if (sp < 1e-3f) return false;
+  for (int k = 0; k < 3; ++k) o[k] = pick->p[k], d[k] = pick->v[k] / sp;
+  // far enough for the next ~0.4 s along the current direction (a chord of the falling curve)
+  *len = std::clamp(sp * 0.4f + 1.5f, 2.0f, 40.0f);
+  pick->ray_out = true;
+  pick->ray_ns = now;
+  *blob = pick->id;
+  return true;
+}
+
+void OnBlobRay(uint32_t blob, bool hit, const float pos[3], const float normal[3]) {
+  std::lock_guard<std::mutex> lock(g_stream_mutex);
+  for (Blob& b : g_blobs) {
+    if (b.id != blob) continue;
+    b.ray_out = false;
+    b.ray_ns = NowNs();
+    b.hit_known = hit;
+    if (hit) {
+      std::copy(pos, pos + 3, b.hit);
+      std::copy(normal, normal + 3, b.hit_n);
+    }
+    return;
+  }
+}
+
+int BlobSnapshot(float (*p)[3], int* kind, int max) {
+  std::lock_guard<std::mutex> lock(g_stream_mutex);
+  const int n = std::min(max, int(g_blobs.size()));
+  for (int i = 0; i < n; ++i) std::copy(g_blobs[size_t(i)].p, g_blobs[size_t(i)].p + 3, p[i]), kind[i] = g_blobs[size_t(i)].kind;
+  return n;
+}
+
+int DropperSnapshot(float (*p)[3], int* kind, int max) {
+  std::lock_guard<std::mutex> lock(g_stream_mutex);
+  const int n = std::min(max, int(g_droppers.size()));
+  for (int i = 0; i < n; ++i) std::copy(g_droppers[size_t(i)].p, g_droppers[size_t(i)].p + 3, p[i]), kind[i] = g_droppers[size_t(i)].kind;
+  return n;
 }
 
 }  // namespace skate3::portal_gel

@@ -35,6 +35,22 @@ struct Effect {
 };
 Effect HumanStep(const float feet[3], const float centre[3], const float v[3], bool grounded, float dt, float gravity, uint32_t frame);
 
+// ---- Gel droppers (Portal 2's paint dropper: a pipe that keeps dropping gel) ----
+// Gel mode has two gun sub-modes, Ctrl+Shift+H switches: paint (a shot paints where it hits) and dropper (a shot places a dropper of that
+// colour: under a ceiling it hits, otherwise 4 m above the hit point). Each dropper drops a blob every 0.2 s; blobs fall, pass through
+// portals (portal_math::BlobAdvance), and paint where they land, so a stream can be redirected with the portals. Clear removes droppers too.
+bool DropperMode();
+void ToggleDropperMode();
+void PlaceDropper(int kind, const float hit[3], const float normal[3], uint32_t frame);
+// Game thread, every human update: spawn and move the blobs. portals = the pair's frames or null.
+void StreamStep(float dt, float gravity, const portal_math::Frame* portals, uint32_t frame);
+// The ray the streams want this frame (one blob, round robin): origin, unit direction, length. False = none.
+bool NextBlobRay(uint32_t* blob, float o[3], float d[3], float* len);
+void OnBlobRay(uint32_t blob, bool hit, const float pos[3], const float normal[3]);
+// Overlay: blob positions / kinds and dropper positions / kinds.
+int BlobSnapshot(float (*p)[3], int* kind, int max);
+int DropperSnapshot(float (*p)[3], int* kind, int max);
+
 // A loose prop body after its physics update: true with the new velocity when it hit blue gel (cubes bounce forever, as in Portal 2).
 bool BodyStep(const float p[3], const float v[3], float out_v[3]);
 

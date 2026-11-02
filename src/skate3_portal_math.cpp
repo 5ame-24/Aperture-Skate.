@@ -449,6 +449,31 @@ int GelPaint(GelPatch* list, int* n, int max, const GelPatch& p) {
   return covered;
 }
 
+int BlobAdvance(const Frame* g, float p[3], float v[3], float gravity, float dt, float min_exit) {
+  v[1] -= gravity * dt;
+  const float step[3] = {v[0] * dt, v[1] * dt, v[2] * dt};
+  const float len = std::sqrt(Dot(step, step));
+  if (g && len > 1e-6f) {
+    const float d[3] = {step[0] / len, step[1] / len, step[2] / len};
+    int from = -1;
+    float oo[3], od[3];
+    if (RayThroughPortal(g, p, d, len, 0.0f, &from, oo, od)) {
+      // how far into the step the plane was: the rest of the step continues out of the other portal
+      const Frame& e = g[from];
+      const float rel[3] = {e.c[0] - p[0], e.c[1] - p[1], e.c[2] - p[2]};
+      const float t = std::clamp(Dot(rel, e.n) / Dot(d, e.n), 0.0f, len);
+      const float speed = std::max(std::sqrt(Dot(v, v)), min_exit);
+      for (int k = 0; k < 3; ++k) {
+        v[k] = od[k] * speed;
+        p[k] = oo[k] + od[k] * (len - t);
+      }
+      return from;
+    }
+  }
+  for (int k = 0; k < 3; ++k) p[k] += step[k];
+  return -1;
+}
+
 int GelRing(const GelPatch& g, float lift, int segments, float out[][3]) {
   segments = std::clamp(segments, 3, 32);
   // in-plane axes: t across, b = n x t, so (t, b, n) is right-handed and increasing angle runs counter-clockwise seen from the front

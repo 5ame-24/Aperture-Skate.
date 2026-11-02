@@ -497,6 +497,28 @@ int main() {
     CHECK(!RayThroughPortal(g, behind, back, 10.0f, 0.3f, &from, oo, od));
     CHECK(!RayThroughPortal(g, o, d, 5.0f, 0.3f, &from, oo, od));
   }
+  {
+    // a dropper's blob falls 4 m into a floor portal (facing up at y = 0) and comes out of a wall portal (facing +x at x = 30, centre y = 2)
+    // moving along +x, at least the paint exit speed
+    Frame g[2];
+    const float c0[3] = {0, 0, 0}, n0[3] = {0, 1, 0}, u0[3] = {0, 0, 1};
+    const float c1[3] = {30, 2, 0}, n1[3] = {1, 0, 0}, u1[3] = {0, 1, 0};
+    SetFrame(g[0], c0, n0, u0, 0.0f);
+    SetFrame(g[1], c1, n1, u1, 0.0f);
+    float p[3] = {0.3f, 4.0f, 0.2f}, v[3] = {0, -1, 0};
+    int through = -1, steps = 0;
+    while (through < 0 && steps < 200) {
+      through = BlobAdvance(g, p, v, 9.81f, 1.0f / 30.0f, 5.7f);
+      ++steps;
+    }
+    CHECK(through == 0 && steps > 20 && steps < 40);
+    CHECK(v[0] > 5.6f && std::abs(v[1]) < 1e-3f && Near(p[0], 30.0f, 0.5f) && p[0] > 30.0f);
+    // the blob's speed into the floor (~9 m/s) is kept; the exit minimum only lifts a slow one
+    CHECK(v[0] > 8.0f);
+    // without portals it just falls
+    float q[3] = {0, 1, 0}, w[3] = {1, 0, 0};
+    CHECK(BlobAdvance(nullptr, q, w, 10.0f, 0.1f, 5.7f) == -1 && Near(q[0], 0.1f) && Near(w[1], -1.0f) && Near(q[1], 0.9f));
+  }
   std::puts("skate3_portal_math_test: ok");
   return 0;
 }

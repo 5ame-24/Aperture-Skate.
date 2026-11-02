@@ -728,3 +728,10 @@ Actor offsets: +1200/+1216 ground pos, +1232 delta, +1248 velocity, +1296 flags,
     - Props: falling onto blue at >= 1.5 m/s comes back at least skate3_portal_gel_prop_bounce (5 m/s, ~1.3 m); run 197's reflections were
       1-2 m/s settling props (a few cm, invisible).
     - Later round (requested): an in-air gel object (Portal-style) to help aim the mechanic.
+65. Gel droppers (built, untested; the "in-air gel object" the tester asked for). In gel mode Ctrl+Shift+H switches the gun between paint and
+    DROPPER; a dropper shot places a pipe (under a ceiling it hits, else 4 m above the hit; 4 at most). Each drops a blob every 0.2 s; blobs
+    fall under the measured gravity, pass through portals (portal_math::BlobAdvance, tested: floor portal -> wall portal, at least Portal 2's
+    paint exit speed 5.7 m/s) and paint where they land (quietly, merged with the same spot). Landing uses the game's ray service: one more
+    ray per Start/End batch (BlobRay, scratch below the cube's), round robin, the blob with the oldest answer, refreshed every 0.25 s and after
+    a portal. Overlay: droppers (dark nozzle, coloured ring), blobs (dots). Logs `dropper placed`, `blob N went through the blue portal`, `blob
+    paint #N` (every 50th, with the count lost after 5 s without a surface). Clear removes droppers and blobs.
