@@ -896,7 +896,7 @@ void Skate3BaseApp::OnShutdown() {
 void Skate3BaseApp::RegisterAppBind(std::string_view name, std::string_view default_key,
                                     std::string_view description,
                                     std::function<void()> callback) {
-  RegisterAppBind(name, default_key, description, std::move(callback));
+  rex::ui::RegisterBind(name, default_key, description, std::move(callback));
   registered_binds_.emplace_back(name);
 }
 
