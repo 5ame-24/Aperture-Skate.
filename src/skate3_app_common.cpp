@@ -4,6 +4,7 @@
 #include "skate3_portal_chell.h"
 #include "skate3_portal_gel.h"
 #include "skate3_fov.h"
+#include "skate3_freecam_input.h"
 #include "skate3_iso_installer.h"
 #include "skate3_native_render.h"
 #include "skate3_native_scene.h"
@@ -789,6 +790,13 @@ void Skate3BaseApp::OnPostSetup() {
   skate3::shader_disasm::RunIfRequested();
   ApplySelectedProfileToRuntime();
   ApplyGameplayCursorMode();
+  // The drone/free-fly cam sources its keyboard/mouse from the app's window
+  // event mirror on every platform (the raw GetAsyncKeyState path in
+  // UpdateFreecam is Windows-only). Independent of the MnK controller-emulation
+  // driver so mnk_mode doesn't have to be enabled to fly.
+  if (window()) {
+    skate3::freecam_input::Register(window());
+  }
 
   if (auto* input_system = static_cast<rex::input::InputSystem*>(runtime()->input_system())) {
     input_system->SetActiveCallback([this]() {
@@ -869,6 +877,9 @@ void Skate3BaseApp::OnPostSetup() {
 }
 
 void Skate3BaseApp::OnShutdown() {
+  if (window()) {
+    skate3::freecam_input::Unregister(window());
+  }
   // Before the dialogs below are reset: the bind callbacks capture `this` and
   // reach into them. The SDK's bind registry is a process-lifetime static and
   // ReXApp::OnDestroy calls OnShutdown before tearing down its own overlays,

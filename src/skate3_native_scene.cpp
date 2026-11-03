@@ -7,6 +7,7 @@
 #include "skate3_portal_camera.h"
 #include "skate3_portal_gate.h"
 #include "skate3_native_scene.h"
+#include "skate3_freecam_input.h"
 
 #include "generated/skate3_init.h"
 
@@ -6269,6 +6270,34 @@ bool UpdateFreecam(FrameScene& scene, const float cam_view[16], double now) {
   } else {
     fc.mouse_anchored = false;
   }
+#else
+  // Cross-platform host input capture (see skate3_freecam_input.h). The raw
+  // GetAsyncKeyState path only exists on Windows; every other platform sources
+  // continuous key state + right-drag mouse deltas from the app's window event
+  // mirror, captured on the UI thread and drained here on the guest thread.
+  // VirtualKey values are identical to the Win32 VK_* codes above.
+  using rex::ui::VirtualKey;
+  const auto down = [](VirtualKey vk) { return freecam_input::IsKeyDown(vk); };
+  mv_f = (down(VirtualKey::kW) ? 1.0 : 0.0) - (down(VirtualKey::kS) ? 1.0 : 0.0);
+  mv_r = (down(VirtualKey::kD) ? 1.0 : 0.0) - (down(VirtualKey::kA) ? 1.0 : 0.0);
+  mv_u = ((down(VirtualKey::kE) || down(VirtualKey::kSpace)) ? 1.0 : 0.0) -
+         ((down(VirtualKey::kQ) || down(VirtualKey::kC)) ? 1.0 : 0.0);
+  lk_yaw = (down(VirtualKey::kRight) ? 1.0 : 0.0) -
+           (down(VirtualKey::kLeft) ? 1.0 : 0.0);
+  lk_pitch = (down(VirtualKey::kUp) ? 1.0 : 0.0) -
+             (down(VirtualKey::kDown) ? 1.0 : 0.0);
+  zoom_dir = (down(VirtualKey::kZ) ? 1.0 : 0.0) -
+             (down(VirtualKey::kX) ? 1.0 : 0.0);
+  if (down(VirtualKey::kShift)) {
+    speed_mult = 4.0;
+  } else if (down(VirtualKey::kControl)) {
+    speed_mult = 0.2;
+  }
+  int32_t mdx = 0, mdy = 0;
+  freecam_input::DrainMouseDelta(mdx, mdy);
+  constexpr double kRadPerPixel = 0.0022;  // ~0.13 deg per pixel
+  mouse_yaw = mdx * kRadPerPixel;
+  mouse_pitch = -mdy * kRadPerPixel;
 #endif
 
   // Look: arrow keys drive a smoothed angular velocity (cinematic ease-in/
