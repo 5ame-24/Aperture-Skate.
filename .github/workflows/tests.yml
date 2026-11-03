@@ -1,0 +1,41 @@
+# Portal unit tests. They need no game data, no SDK checkout and no secrets: each test compiles one
+# source file with clang and runs it. The game itself is not built here.
+name: tests
+
+on:
+  push:
+    branches: [portal-mashup, aperture-import]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  portal-unit:
+    name: portal unit tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and run each test
+        shell: bash
+        run: |
+          set -euo pipefail
+          for t in skate3_portal_math skate3_portal skate3_portal_retarget skate3_portal_autotest; do
+            src=$(case $t in
+              skate3_portal_math) echo src/skate3_portal_math.cpp ;;
+              skate3_portal) echo src/skate3_portal.cpp ;;
+              skate3_portal_retarget) echo src/skate3_portal_retarget.cpp ;;
+              skate3_portal_autotest) echo src/skate3_portal_autotest.cpp ;;
+            esac)
+            clang++ -std=c++23 -Wall -Wextra -Werror -Isrc "tests/${t}_test.cpp" "$src" -o "/tmp/${t}_test"
+            "/tmp/${t}_test"
+          done
