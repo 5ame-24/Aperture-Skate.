@@ -32,6 +32,8 @@ struct Host {
   virtual ~Host() = default;
   virtual void SetCvar(const std::string& name, const std::string& value) = 0;
   virtual std::string GetCvar(const std::string& name) = 0;
+  // the human's player state (100 = riding on the ground); default 100 for hosts that cannot tell
+  virtual int PlayerState() { return 100; }
   virtual void ClearPortals() = 0;
   // which 0 blue (entry) / 1 orange (exit); hit = point on the surface, normal out of it, shot = the shooting direction (floor "up")
   virtual void PlacePortal(int which, const float hit[3], const float normal[3], const float shot[3]) = 0;

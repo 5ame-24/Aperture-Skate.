@@ -21,6 +21,7 @@
 #include <fstream>
 #include <initializer_list>
 #include <mutex>
+#include <map>
 #include <unordered_map>
 #include <unordered_set>
 #include <string>
@@ -2110,6 +2111,7 @@ void WalkScanStep(uint8_t* base, uint32_t self, const float v[3]) {
 bool g_at_tp_pending = false;
 float g_at_tp_feet[3] = {}, g_at_tp_h[2] = {0, 1};
 bool g_at_crossed = false;
+int g_at_state = 100;  // the human actor's player state, refreshed each GateStep (read by the AUTOTEST host)
 struct AutotestHost : skate3::portal_autotest::Host {
   void SetCvar(const std::string& n, const std::string& v) override { rex::cvar::SetFlagByName(n.c_str(), v.c_str()); }
   std::string GetCvar(const std::string& n) override;
@@ -2117,7 +2119,9 @@ struct AutotestHost : skate3::portal_autotest::Host {
   void PlacePortal(int which, const float hit[3], const float normal[3], const float shot[3]) override {
     skate3::portal_gate::PlaceOn(which, hit, normal, shot);
   }
+  int PlayerState() override { return g_at_state; }
   bool Teleport(const float feet[3], float hx, float hz) override {
+    if (g_at_tp_pending) return false;  // one relocation at a time
     std::copy(feet, feet + 3, g_at_tp_feet);
     g_at_tp_h[0] = hx, g_at_tp_h[1] = hz;
     g_at_tp_pending = true;  // GateStep arms it (it needs the update's stack)
@@ -2207,6 +2211,11 @@ bool GateStep(PPCContext& ctx, uint8_t* base, uint32_t self) {
     }
   }
   if (skate3::portal_autotest::Running()) {
+    {
+      uint32_t st = 0;
+      ReadBe32(base, self + 1336, &st);
+      g_at_state = int(st);
+    }
     skate3::portal_autotest::Step(g_at_host, double(std::chrono::steady_clock::now().time_since_epoch().count()) * 1e-9, g_at_crossed, tracked, have);
     g_at_crossed = false;
     if (g_at_tp_pending && !(flags & kRelocateBit)) {
@@ -2264,6 +2273,12 @@ bool GateStep(PPCContext& ctx, uint8_t* base, uint32_t self) {
     const uint32_t he = g_human_entity;
     bool ok = g_track_lost >= 5 && he && skate3::native_entity::CharacterWorldPos(base, he, q);
     const char* why = g_track_lost < 5 ? "waiting" : !he ? "no locked entity" : !ok ? "locked entity not readable" : nullptr;
+    // Off the board the locked entity can be missing or unreadable (the AUTOTEST report: the gun could not find the skater on foot): fall back
+    // to the presentation entity itself; the distance limit below still refuses a different skater.
+    if (!ok && g_track_lost >= 5 && skate3::native_entity::SkaterWorldPos(base, q)) {
+      ok = true;
+      why = nullptr;
+    }
     if (ok) {
       const float from[3] = {g_track_since_cross < 30 ? g_track_exit[0] : tracked[0], g_track_since_cross < 30 ? g_track_exit[1] : tracked[1],
                              g_track_since_cross < 30 ? g_track_exit[2] : tracked[2]};
@@ -2288,6 +2303,13 @@ bool GateStep(PPCContext& ctx, uint8_t* base, uint32_t self) {
     if (logged++ < 40) {
       REXLOG_INFO("portal-probe: FPVTRACK [f {}] re-acquired the skater through its entity at ({:.2f}, {:.2f}, {:.2f}) after {} lost frames, flags {:08X}", g_gate_frame,
                   p[0], p[1], p[2], g_track_lost, flags);
+    }
+    {
+      static int refound = 0;
+      if (refound++ < 60) {
+        REXLOG_INFO("portal-probe: GUNREFIND [f {}] the gun found the skater again after {} lost frames (~{:.2f} s), state {}", g_gate_frame, g_track_lost,
+                    float(g_track_lost) / 60.0f, g_at_state);
+      }
     }
     g_track_lost = 0;
   } else {
@@ -3520,6 +3542,10 @@ extern "C" REX_FUNC(sub_82DB6EC0) {
 // the locked human actor, and that actor stopped updating (replaced or parked). The lock moves to another actor that matches the human's
 // presentation entity once the locked one has had no update for 1 s; tracking restarts from it.
 std::atomic<int64_t> g_human_seen_ns{0};
+// AUTOTEST run 221: the lock flipped 403DF020 <-> 407AB020 within 2 s (state 700 on each): during a teleport the game updates a second actor
+// for the same skater and the locked one pauses. A candidate now has to (1) be the one updating every frame (10 updates in a row, gaps
+// < 100 ms), (2) not be mid-teleport itself, (3) wait for the old one to be silent 1 s (4 s if the old one is teleporting), and (4) at most
+// one re-lock per 5 s, so a relocation gives a single re-lock.
 void HumanLockWatch(uint8_t* base, uint32_t self) {
   const int64_t now = std::chrono::steady_clock::now().time_since_epoch().count();
   if (self == g_human) {
@@ -3527,15 +3553,34 @@ void HumanLockWatch(uint8_t* base, uint32_t self) {
     return;
   }
   const uint32_t old = g_human;
-  if (!old || now - g_human_seen_ns.load() < 1'000'000'000ll) return;
+  if (!old) return;
+  static std::mutex mu;
+  static std::map<uint32_t, std::pair<int64_t, int>> runs;  // actor -> (last update ns, consecutive updates with gaps < 100 ms)
+  static int64_t last_relock_ns = 0;
+  int run = 0;
+  {
+    std::lock_guard lock(mu);
+    auto& r = runs[self];
+    r.second = (r.first && now - r.first < 100'000'000ll) ? r.second + 1 : 1;
+    r.first = now;
+    run = r.second;
+  }
+  const int64_t seen = g_human_seen_ns.load();
+  const int64_t silent = now - seen;
+  if (silent < 1'000'000'000ll || run < 10) return;
+  uint32_t old_st = 0, st = 0;
+  ReadBe32(base, old + 1336, &old_st);
+  ReadBe32(base, self + 1336, &st);
+  if ((old_st == 700 || old_st == 702) && silent < 4'000'000'000ll) return;  // the old one is mid-teleport: give it time
+  if (st == 700 || st == 702) return;                                         // the candidate is a teleporting twin, not the live one
+  if (last_relock_ns && now - last_relock_ns < 5'000'000'000ll) return;
   float pos[3];
   if (!skate3::native_entity::SkaterWorldPos(base, pos) || !IsPlayer(base, self, pos)) return;
-  uint32_t st = 0;
-  ReadBe32(base, self + 1336, &st);
-  REXLOG_INFO("portal-probe: human skater actor RE-LOCKED: {:08X} -> {:08X} (the old one had no update for {:.1f} s; state {}); tracking restarts",
-              old, self, float(now - g_human_seen_ns.load()) * 1e-9f, st);
+  REXLOG_INFO("portal-probe: human skater actor RE-LOCKED: {:08X} -> {:08X} (the old one had no update for {:.1f} s, state {}; the new one updated {} frames "
+              "in a row, state {}); tracking restarts", old, self, float(silent) * 1e-9f, old_st, run, st);
   g_human = self;
   g_human_seen_ns = now;
+  last_relock_ns = now;
   g_track_restart = true;
 }
 

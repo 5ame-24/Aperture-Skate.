@@ -36,8 +36,10 @@ struct Fake : Host {
       --refuse_next;
       return false;
     }
-    ++teleports;
-    std::copy(feet, feet + 3, last_feet);
+    if (feet[1] > 2.5f) {  // a drop (the placing teleport to A's centre is not counted)
+      ++teleports;
+      std::copy(feet, feet + 3, last_feet);
+    }
     return true;
   }
   void Log(const std::string& l) override { log.push_back(l); }
@@ -57,7 +59,8 @@ int main() {
   double t = 0;
   int trial = 0;
   while (Running() && t < 2000) {
-    Step(h, t, false);
+    const float on_a[3] = {10, 2, 36};  // the skater stands on portal A (6 m ahead of the start)
+    Step(h, t, false, on_a, true);
     // while a trial waits, report a result as the probe would: setting 0 flies well, setting 1 flies half, setting 2 times out on walls
     if (h.teleports > trial) {
       const Trial& tr = plan[size_t(trial)];
@@ -99,9 +102,9 @@ int main() {
     h2.refuse_next = 0;
     Start(h2, ground, heading);
     const float far[3] = {50, 2, 30};
-    for (double t2 = 0; t2 < 3.0; t2 += 0.05) Step(h2, t2, false, far, true);
+    for (double t2 = 0; t2 < 40.0; t2 += 0.05) Step(h2, t2, false, far, true);
     bool skipped = false;
-    for (const auto& l : h2.log) skipped |= l.find("skipped: the skater is not at the drop point") != std::string::npos;
+    for (const auto& l : h2.log) skipped |= l.find("would not settle on the drop point") != std::string::npos;
     CHECK(skipped);
     Stop(h2, "test");
     CHECK(!Running());

@@ -8,7 +8,7 @@
 namespace skate3::portal_autotest {
 namespace {
 
-enum class Phase { kIdle, kPlace, kSettle, kDrop, kWait, kRest };
+enum class Phase { kIdle, kPlace, kSettle, kPrep, kDrop, kWait, kRest };
 
 struct State {
   Phase phase = Phase::kIdle;
@@ -35,6 +35,12 @@ struct State {
   double last_sample = 0;
   float min_h = 1e9f, min_d = 1e9f;
   bool checked_spot = false, skipped = false;
+  // kPrep: put the skater on portal A first and wait until it is riding and level before the drop
+  int prep_tries = 0;
+  bool prep_sent = false;
+  double prep_t = 0, stable_since = 0;
+  float stable_h = 0;
+  bool stable_have = false;
 } g;
 
 const char* ScenarioName(Scenario s) { return s == Scenario::kFloorFloor ? "floor->floor" : "floor->wall"; }
@@ -173,8 +179,56 @@ void Step(Host& host, double now, bool crossed, const float skater[3], bool have
       break;
     }
     case Phase::kSettle:
-      if (now - g.phase_t > 0.5) g.phase = Phase::kDrop;
+      if (now - g.phase_t > 0.5) {
+        g.phase = Phase::kPrep;
+        g.prep_tries = 0;
+        g.prep_sent = false;
+      }
       break;
+    case Phase::kPrep: {
+      // 1) feet at A's centre (retried a few times), 2) wait until the state is 100 (riding), the skater is within 1.5 m of A and its height
+      // has not moved more than 0.1 m for 0.5 s, 3) only then the drop. Otherwise the trial is skipped with the reason.
+      const char* why = nullptr;
+      if (!g.prep_sent) {
+        if (g.prep_tries >= 3) {
+          why = "the skater would not settle on the drop point";
+        } else if (host.Teleport(a, g.fwd[0], g.fwd[1])) {
+          g.prep_sent = true;
+          g.prep_t = now;
+          g.stable_have = false;
+          ++g.prep_tries;
+        }
+      } else if (now - g.prep_t > 0.4) {  // (give the relocation time to start before judging)
+        const int st = host.PlayerState();
+        const bool near_a = have && skater && std::hypot(skater[0] - a[0], skater[2] - a[2]) < 1.5f && std::abs(skater[1] - a[1]) < 2.0f;
+        if (st == 100 && near_a) {
+          if (!g.stable_have || std::abs(skater[1] - g.stable_h) > 0.1f) {
+            g.stable_have = true;
+            g.stable_h = skater[1];
+            g.stable_since = now;
+          } else if (now - g.stable_since >= 0.5) {
+            host.Log("AUTOTEST trial " + std::to_string(g.index + 1) + "/" + std::to_string(g.plan.size()) + ": skater on the drop point (state 100, level for 0.5 s), dropping");
+            g.phase = Phase::kDrop;
+            break;
+          }
+        } else {
+          g.stable_have = false;
+        }
+        if (now - g.prep_t > 4.0) g.prep_sent = false;  // not settled in 4 s: place it again
+      }
+      if (why) {
+        char b5[200];
+        std::snprintf(b5, sizeof(b5), "AUTOTEST trial %zu/%zu [%s] %s from %.0f m: skipped (%s; state %d, %s)", g.index + 1, g.plan.size(),
+                      Settings()[size_t(t.setting)].name.c_str(), ScenarioName(t.scenario), t.height, why, host.PlayerState(),
+                      have && skater ? "tracked" : "skater not tracked");
+        host.Log(b5);
+        g.rows.push_back({t, false, Result{}});
+        host.ClearPortals();
+        g.phase = Phase::kRest;
+        g.phase_t = now;
+      }
+      break;
+    }
     case Phase::kDrop: {
       const float feet[3] = {a[0], a[1] + t.height, a[2]};
       if (host.Teleport(feet, g.fwd[0], g.fwd[1])) {
