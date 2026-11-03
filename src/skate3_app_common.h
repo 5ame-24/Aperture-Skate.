@@ -9,6 +9,8 @@
 #include <optional>
 #include <set>
 #include <string>
+#include <string_view>
+#include <vector>
 
 #include <rex/rex_app.h>
 #include <rex/ui/overlay/simple_settings_overlay.h>
@@ -50,6 +52,11 @@ class Skate3BaseApp : public rex::ReXApp {
   void LogUserMarker();
   void LogDebugMarker();
   void ApplySelectedProfileToRuntime();
+  // rex::ui::RegisterBind plus bookkeeping: OnShutdown unregisters every bind
+  // registered through this, newest first (the SDK has no RAII bind handle).
+  void RegisterAppBind(std::string_view name, std::string_view default_key,
+                       std::string_view description, std::function<void()> callback);
+  void UnregisterAppBinds();
 
   static bool IsRecipeNameChar(char c);
   static std::set<std::string> DiscoverRecipeAliases(
@@ -67,4 +74,6 @@ class Skate3BaseApp : public rex::ReXApp {
   bool recipe_overlay_installed_ = false;
   bool big_device_aliases_installed_ = false;
   std::atomic<uint32_t> debug_marker_count_{0};
+  // Names of the binds registered by RegisterAppBind, in registration order.
+  std::vector<std::string> registered_binds_;
 };

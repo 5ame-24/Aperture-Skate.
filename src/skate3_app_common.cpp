@@ -688,41 +688,41 @@ void Skate3BaseApp::OnCreateDialogs(rex::ui::ImGuiDrawer* drawer) {
   // so it never affects cursor or focus handling.
   render_mode_indicator_ = std::make_unique<skate3::RenderModeIndicator>(drawer);
   portal_gate_overlay_ = std::make_unique<skate3::portal_gate::Overlay>(drawer);
-  rex::ui::RegisterBind("bind_skate3_portal_blue", "Ctrl+1", "Portal gate: place blue ring",
+  RegisterAppBind("bind_skate3_portal_blue", "Ctrl+1", "Portal gate: place blue ring",
                         [] { skate3::portal_gate::Request(0); });
-  rex::ui::RegisterBind("bind_skate3_portal_orange", "Ctrl+2", "Portal gate: place orange ring",
+  RegisterAppBind("bind_skate3_portal_orange", "Ctrl+2", "Portal gate: place orange ring",
                         [] { skate3::portal_gate::Request(1); });
-  rex::ui::RegisterBind("bind_skate3_portal_clear", "Ctrl+3", "Portal gate: clear rings",
+  RegisterAppBind("bind_skate3_portal_clear", "Ctrl+3", "Portal gate: clear rings",
                         [] { skate3::portal_gate::Request(2); });
-  rex::ui::RegisterBind("bind_skate3_portal_fpv", "Ctrl+4", "Portal gate: first-person view",
+  RegisterAppBind("bind_skate3_portal_fpv", "Ctrl+4", "Portal gate: first-person view",
                         [] { skate3::portal_gate::ToggleFpv(); });
-  rex::ui::RegisterBind("bind_skate3_portal_cube", "Ctrl+5", "Portal gate: spawn the companion cube",
+  RegisterAppBind("bind_skate3_portal_cube", "Ctrl+5", "Portal gate: spawn the companion cube",
                         [] { skate3::portal_cube::RequestSpawn(); });
-  rex::ui::RegisterBind("bind_skate3_portal_grindcapture", "Ctrl+8", "Portal gate: log the game's grind probes for 8 s",
+  RegisterAppBind("bind_skate3_portal_grindcapture", "Ctrl+8", "Portal gate: log the game's grind probes for 8 s",
                         [] { skate3::portal_gate::RequestGrindCapture(); });
-  rex::ui::RegisterBind("bind_skate3_portal_chell", "Ctrl+0", "Portal characters: you become Chell / Atlas / P-body / yourself (cycles)",
+  RegisterAppBind("bind_skate3_portal_chell", "Ctrl+0", "Portal characters: you become Chell / Atlas / P-body / yourself (cycles)",
                         [] { skate3::portal_chell::Toggle(); });
-  rex::ui::RegisterBind("bind_skate3_portal_coop", "Ctrl+Shift+0", "Portal characters: co-op on/off (the two nearest NPCs become Atlas and P-body)",
+  RegisterAppBind("bind_skate3_portal_coop", "Ctrl+Shift+0", "Portal characters: co-op on/off (the two nearest NPCs become Atlas and P-body)",
                         [] { skate3::portal_chell::ToggleCoop(); });
-  rex::ui::RegisterBind("bind_skate3_portal_slots", "Ctrl+Shift+C", "Portal characters: the character slots panel (you, co-op 1, co-op 2)",
+  RegisterAppBind("bind_skate3_portal_slots", "Ctrl+Shift+C", "Portal characters: the character slots panel (you, co-op 1, co-op 2)",
                         [] { skate3::portal_chell::TogglePicker(); });
-  rex::ui::RegisterBind("bind_skate3_portal_charsel", "Ctrl+Shift+9", "Portal characters: scan for the game's character-select list (log only)",
+  RegisterAppBind("bind_skate3_portal_charsel", "Ctrl+Shift+9", "Portal characters: scan for the game's character-select list (log only)",
                         [] { skate3::portal_chell::RequestSelectorProbe(); });
-  rex::ui::RegisterBind("bind_skate3_portal_adopt", "Ctrl+9", "Portal gate: make the nearest game prop the companion cube (again: release it)",
+  RegisterAppBind("bind_skate3_portal_adopt", "Ctrl+9", "Portal gate: make the nearest game prop the companion cube (again: release it)",
                         [] { skate3::portal_gate::RequestAdopt(); });
-  rex::ui::RegisterBind("bind_skate3_portal_wake", "Ctrl+7", "Portal gate: wake the sleeping props around the skater",
+  RegisterAppBind("bind_skate3_portal_wake", "Ctrl+7", "Portal gate: wake the sleeping props around the skater",
                         [] { skate3::portal_gate::RequestWake(); });
-  rex::ui::RegisterBind("bind_skate3_portal_selftest", "Ctrl+6", "Portal gate: self-test (drop / toss the nearest prop into the portals)",
+  RegisterAppBind("bind_skate3_portal_selftest", "Ctrl+6", "Portal gate: self-test (drop / toss the nearest prop into the portals)",
                         [] { skate3::portal_gate::RequestSelfTest(); });
-  rex::ui::RegisterBind("bind_skate3_portal_gel", "Ctrl+H", "Portal gate: gel mode on/off (the gun paints blue bounce / orange speed gel)",
+  RegisterAppBind("bind_skate3_portal_gel", "Ctrl+H", "Portal gate: gel mode on/off (the gun paints blue bounce / orange speed gel)",
                         [] { skate3::portal_gel::ToggleMode(); });
-  rex::ui::RegisterBind("bind_skate3_portal_autotest", "Ctrl+Shift+T", "Portal gate: AUTOTEST (automatic drops through test portals, scored; again = stop)",
+  RegisterAppBind("bind_skate3_portal_autotest", "Ctrl+Shift+T", "Portal gate: AUTOTEST (automatic drops through test portals, scored; again = stop)",
                         [] { skate3::portal_gate::RequestAutotest(); });
-  rex::ui::RegisterBind("bind_skate3_portal_fling_mode", "Ctrl+F", "Portal gate: fling exit mode (ollie / air / lift / release)",
+  RegisterAppBind("bind_skate3_portal_fling_mode", "Ctrl+F", "Portal gate: fling exit mode (ollie / air / lift / release)",
                         [] { skate3::portal_gate::CycleFlingMode(); });
-  rex::ui::RegisterBind("bind_skate3_portal_grab", "Ctrl+G", "Portal gate: grab / drop the companion cube",
+  RegisterAppBind("bind_skate3_portal_grab", "Ctrl+G", "Portal gate: grab / drop the companion cube",
                         [] { skate3::portal_cube::RequestGrab(); });
-  rex::ui::RegisterBind("bind_skate3_menu", "Escape", "Skate 3 settings", [this] {
+  RegisterAppBind("bind_skate3_menu", "Escape", "Skate 3 settings", [this] {
     // Escape backs out of the settings screen level by level (rows ->
     // category rail -> closed); when the screen is closed it opens it.
     if (simple_settings_dialog_ && simple_settings_dialog_->visible()) {
@@ -731,7 +731,7 @@ void Skate3BaseApp::OnCreateDialogs(rex::ui::ImGuiDrawer* drawer) {
       ToggleSimpleSettings();
     }
   });
-  rex::ui::RegisterBind("bind_skate3_menu_alt", "F1", "Skate 3 settings alternate", [this] {
+  RegisterAppBind("bind_skate3_menu_alt", "F1", "Skate 3 settings alternate", [this] {
     ToggleSimpleSettings();
   });
   // Remembered handle: the F11 paired A/B parity capture (native + emulated
@@ -739,50 +739,50 @@ void Skate3BaseApp::OnCreateDialogs(rex::ui::ImGuiDrawer* drawer) {
   // skate3_native_render.cpp) needs the window without an app pointer.
   skate3::screenshot::RememberWindow(window() ? window()->GetNativeWindowHandle()
                                               : nullptr);
-  rex::ui::RegisterBind("bind_skate3_screenshot", "F6",
-                        "Save screenshot to screenshots/", [this] {
-                          skate3::screenshot::CaptureWindow(
-                              window() ? window()->GetNativeWindowHandle() : nullptr);
-                        });
-  rex::ui::RegisterBind("bind_skate3_native_render_toggle", "F5",
-                        "Toggle native/emulated renderer", [] {
-                          skate3::native_scene::ToggleSceneEnabled();
-                        });
-  rex::ui::RegisterBind("bind_skate3_save_draw_fingerprints", "F8",
-                        "Save draw fingerprint log", [this] {
-                          SaveDrawFingerprintLog();
-                        });
-  rex::ui::RegisterBind("bind_skate3_log_debug_marker", "F9",
-                        "Write debug marker to log", [this] {
-                          LogDebugMarker();
-                        });
-  rex::ui::RegisterBind("bind_skate3_log_user_marker", "F10",
-                        "Write marker to log", [this] {
-                          LogUserMarker();
-                        });
-  rex::ui::RegisterBind("bind_skate3_native_debug", "F12",
-                        "Native render debug menu", [this] {
-                          ToggleNativeDebug();
-                        });
-  rex::ui::RegisterBind("bind_skate3_showcase", "Ctrl+Shift+B",
-                        "Graphics build-up showcase", [] {
-                          // A capture/recording tool, not a player feature:
-                          // like the capture hotkeys, the bind is inert
-                          // unless the diagnostics cvar opts in (the F12
-                          // Showcase Setup window still starts runs).
-                          if (!REXCVAR_GET(skate3_native_render_capture_hotkeys)) {
-                            return;
-                          }
-                          REXCVAR_SET(
-                              skate3_native_render_scene_showcase,
-                              !REXCVAR_GET(skate3_native_render_scene_showcase));
-                        });
-  rex::ui::RegisterBind("bind_skate3_freecam", "End",
-                        "Drone camera (free fly)", [] {
-                          REXCVAR_SET(
-                              skate3_native_render_scene_freecam,
-                              !REXCVAR_GET(skate3_native_render_scene_freecam));
-                        });
+  RegisterAppBind("bind_skate3_screenshot", "F6",
+                  "Save screenshot to screenshots/", [this] {
+                    skate3::screenshot::CaptureWindow(
+                        window() ? window()->GetNativeWindowHandle() : nullptr);
+                  });
+  RegisterAppBind("bind_skate3_native_render_toggle", "F5",
+                  "Toggle native/emulated renderer", [] {
+                    skate3::native_scene::ToggleSceneEnabled();
+                  });
+  RegisterAppBind("bind_skate3_save_draw_fingerprints", "F8",
+                  "Save draw fingerprint log", [this] {
+                    SaveDrawFingerprintLog();
+                  });
+  RegisterAppBind("bind_skate3_log_debug_marker", "F9",
+                  "Write debug marker to log", [this] {
+                    LogDebugMarker();
+                  });
+  RegisterAppBind("bind_skate3_log_user_marker", "F10",
+                  "Write marker to log", [this] {
+                    LogUserMarker();
+                  });
+  RegisterAppBind("bind_skate3_native_debug", "F12",
+                  "Native render debug menu", [this] {
+                    ToggleNativeDebug();
+                  });
+  RegisterAppBind("bind_skate3_showcase", "Ctrl+Shift+B",
+                  "Graphics build-up showcase", [] {
+                    // A capture/recording tool, not a player feature:
+                    // like the capture hotkeys, the bind is inert
+                    // unless the diagnostics cvar opts in (the F12
+                    // Showcase Setup window still starts runs).
+                    if (!REXCVAR_GET(skate3_native_render_capture_hotkeys)) {
+                      return;
+                    }
+                    REXCVAR_SET(
+                        skate3_native_render_scene_showcase,
+                        !REXCVAR_GET(skate3_native_render_scene_showcase));
+                  });
+  RegisterAppBind("bind_skate3_freecam", "End",
+                  "Drone camera (free fly)", [] {
+                    REXCVAR_SET(
+                        skate3_native_render_scene_freecam,
+                        !REXCVAR_GET(skate3_native_render_scene_freecam));
+                  });
 }
 
 void Skate3BaseApp::OnPostSetup() {
@@ -869,18 +869,34 @@ void Skate3BaseApp::OnPostSetup() {
 }
 
 void Skate3BaseApp::OnShutdown() {
-  rex::ui::UnregisterBind("bind_skate3_menu");
-  rex::ui::UnregisterBind("bind_skate3_menu_alt");
-  rex::ui::UnregisterBind("bind_skate3_save_draw_fingerprints");
-  rex::ui::UnregisterBind("bind_skate3_log_debug_marker");
-  rex::ui::UnregisterBind("bind_skate3_log_user_marker");
-  rex::ui::UnregisterBind("bind_skate3_native_debug");
+  // Before the dialogs below are reset: the bind callbacks capture `this` and
+  // reach into them. The SDK's bind registry is a process-lifetime static and
+  // ReXApp::OnDestroy calls OnShutdown before tearing down its own overlays,
+  // so unregistering here is always inside the registry's lifetime.
+  UnregisterAppBinds();
   ApplyGameplayCursorMode();
   skate3::native_scene::SetSettingsMenuBlur(false);
   simple_settings_dialog_.reset();
   native_debug_dialog_.reset();
   render_mode_indicator_.reset();
   portal_gate_overlay_.reset();
+}
+
+void Skate3BaseApp::RegisterAppBind(std::string_view name, std::string_view default_key,
+                                    std::string_view description,
+                                    std::function<void()> callback) {
+  RegisterAppBind(name, default_key, description, std::move(callback));
+  registered_binds_.emplace_back(name);
+}
+
+void Skate3BaseApp::UnregisterAppBinds() {
+  // Reverse registration order. UnregisterBind nulls the callback (the entry
+  // and its cvar stay registered), so a key event after this is a no-op.
+  for (auto it = registered_binds_.rbegin(); it != registered_binds_.rend(); ++it) {
+    rex::ui::UnregisterBind(*it);
+  }
+  REXLOG_INFO("Skate 3 shutdown: unregistered {} key binds", registered_binds_.size());
+  registered_binds_.clear();
 }
 
 void Skate3BaseApp::ToggleSimpleSettings() {
