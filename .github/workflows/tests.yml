@@ -29,13 +29,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # macOS runners use bash 3.2, which cannot parse a case inside $(...); each test's
+          # source is named after the test, so the name alone is enough.
           for t in skate3_portal_math skate3_portal skate3_portal_retarget skate3_portal_autotest; do
-            src=$(case $t in
-              skate3_portal_math) echo src/skate3_portal_math.cpp ;;
-              skate3_portal) echo src/skate3_portal.cpp ;;
-              skate3_portal_retarget) echo src/skate3_portal_retarget.cpp ;;
-              skate3_portal_autotest) echo src/skate3_portal_autotest.cpp ;;
-            esac)
-            clang++ -std=c++23 -Wall -Wextra -Werror -Isrc "tests/${t}_test.cpp" "$src" -o "/tmp/${t}_test"
+            clang++ -std=c++23 -Wall -Wextra -Werror -Isrc "tests/${t}_test.cpp" "src/${t}.cpp" -o "/tmp/${t}_test"
             "/tmp/${t}_test"
           done
