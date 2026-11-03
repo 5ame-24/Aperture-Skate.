@@ -784,6 +784,13 @@ void Skate3BaseApp::OnCreateDialogs(rex::ui::ImGuiDrawer* drawer) {
                         skate3_native_render_scene_freecam,
                         !REXCVAR_GET(skate3_native_render_scene_freecam));
                   });
+  // Mac keyboards have no End key: same toggle on Ctrl+Shift+F.
+  RegisterAppBind("bind_skate3_freecam_mac", "Ctrl+Shift+F",
+                  "Drone camera (free fly), Mac key", [] {
+                    REXCVAR_SET(
+                        skate3_native_render_scene_freecam,
+                        !REXCVAR_GET(skate3_native_render_scene_freecam));
+                  });
 }
 
 void Skate3BaseApp::OnPostSetup() {
