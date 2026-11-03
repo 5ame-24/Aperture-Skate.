@@ -267,6 +267,7 @@ set(SKATE3_COMMON_SOURCES
     src/skate3_portal_cube.cpp
     src/skate3_portal_gunmodel.cpp
     src/skate3_portal_chell.cpp
+    src/skate3_safe_file.cpp
     src/skate3_screenshot.cpp
     src/skate3_shader_disasm.cpp
     src/skate3_title_update_installer.cpp
